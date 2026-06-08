@@ -1,12 +1,13 @@
 import sys
 import html
 import time
+import threading
 import ctypes
 import ctypes.wintypes
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QTextEdit, QSplitter, QFrame)
-from PyQt6.QtGui import QTextCursor
+from PyQt6.QtGui import QTextCursor, QShortcut, QKeySequence
 
 
 class WorkerSignals(QObject):
@@ -21,12 +22,24 @@ class WorkerSignals(QObject):
 signals = WorkerSignals()
 
 
+class HotkeySignals(QObject):
+    toggle_pause = pyqtSignal()
+    clear_ui = pyqtSignal()
+
+
+hotkey_signals = HotkeySignals()
+pause_event = threading.Event()
+pause_event.set()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Interview Assistant")
         self.setMinimumSize(900, 600)
         self.resize(1200, 700)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowOpacity(0.8)
         self.setStyleSheet("background-color: #0D0D0D;")
         self._final_sentences = []
         self._current_interim = ""
@@ -35,8 +48,14 @@ class MainWindow(QMainWindow):
         self._cursor_char_shown = False
         self.cursor_timer = QTimer(self)
         self.cursor_timer.timeout.connect(self._on_cursor_toggle)
+        self.is_paused = False
         self._init_ui()
         self._connect_signals()
+        self.current_opacity = 0.8
+        QShortcut(QKeySequence("Ctrl+="), self).activated.connect(self._increase_opacity)
+        QShortcut(QKeySequence("Ctrl+-"), self).activated.connect(self._decrease_opacity)
+        hotkey_signals.toggle_pause.connect(self._on_toggle_pause)
+        hotkey_signals.clear_ui.connect(self._on_clear_ui)
         self._apply_capture_exclusion()
 
     def _apply_capture_exclusion(self):
@@ -253,6 +272,34 @@ class MainWindow(QMainWindow):
         }
         color = colors.get(status, "#444444")
         self.dot_indicator.setStyleSheet(f"background-color: {color}; border-radius: 4px;")
+
+    def _increase_opacity(self):
+        self.current_opacity = min(1.0, round(self.current_opacity + 0.1, 1))
+        self.setWindowOpacity(self.current_opacity)
+
+    def _decrease_opacity(self):
+        self.current_opacity = max(0.1, round(self.current_opacity - 0.1, 1))
+        self.setWindowOpacity(self.current_opacity)
+
+    def _on_toggle_pause(self):
+        self.is_paused = not self.is_paused
+        if self.is_paused:
+            pause_event.clear()
+            self.setWindowTitle("Interview Assistant  ⏸ [PAUSED]")
+            self.dot_indicator.setStyleSheet("background-color: #FF8800; border-radius: 4px;")
+        else:
+            pause_event.set()
+            self.setWindowTitle("Interview Assistant")
+            self.dot_indicator.setStyleSheet("background-color: #00FF88; border-radius: 4px;")
+
+    def _on_clear_ui(self):
+        self._final_sentences = []
+        self._current_interim = ""
+        self.transcript_edit.clear()
+        self._is_streaming = False
+        self._cursor_char_shown = False
+        self.cursor_timer.stop()
+        self.ai_edit.clear()
 
 
 if __name__ == "__main__":

@@ -6,16 +6,20 @@ from dotenv import load_dotenv
 
 from PyQt6.QtWidgets import QApplication
 
-from main_ui import MainWindow, signals
+from main_ui import MainWindow, signals, hotkey_signals
 import audio_capture
 import stt_client
 import llm_client
+
+try:
+    import keyboard
+except ImportError:
+    keyboard = None
 
 loop = None
 async_thread = None
 DEEPGRAM_API_KEY = ""
 GROQ_API_KEY = ""
-
 
 def _env_device_index(name):
     value = os.environ.get(name, "").strip()
@@ -26,7 +30,6 @@ def _env_device_index(name):
     except ValueError:
         print(f"WARNING: {name} must be a number; ignoring {value!r}", file=sys.stderr)
         return None
-
 
 async def _main_pipeline():
     audio_queue = asyncio.Queue(maxsize=200)
@@ -45,7 +48,6 @@ async def _main_pipeline():
         print(f"main: pipeline error: {exc}", file=sys.stderr)
         signals.status_update.emit("disconnected")
 
-
 def on_quit():
     async def shutdown():
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
@@ -54,8 +56,9 @@ def on_quit():
         loop.stop()
 
     asyncio.run_coroutine_threadsafe(shutdown(), loop)
+    if keyboard is not None:
+        keyboard.unhook_all_hotkeys()
     async_thread.join(timeout=2)
-
 
 if __name__ == "__main__":
     load_dotenv()
@@ -87,6 +90,15 @@ if __name__ == "__main__":
     async_thread.start()
 
     asyncio.run_coroutine_threadsafe(_main_pipeline(), loop)
+
+    if keyboard is None:
+        print("main: keyboard module not installed; global hotkeys disabled.", file=sys.stderr)
+    else:
+        try:
+            keyboard.add_hotkey("f9", lambda: hotkey_signals.toggle_pause.emit(), suppress=True)
+            keyboard.add_hotkey("f10", lambda: hotkey_signals.clear_ui.emit(), suppress=True)
+        except Exception as exc:
+            print(f"main: failed to register global hotkeys: {exc}", file=sys.stderr)
 
     app.aboutToQuit.connect(on_quit)
 

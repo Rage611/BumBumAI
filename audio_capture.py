@@ -1,8 +1,7 @@
 import asyncio
 import audioop
 import sys
-import time
-
+from main_ui import pause_event
 import pyaudio
 
 OUTPUT_SAMPLE_RATE = 16000
@@ -82,8 +81,10 @@ def resolve_system_device(system_device_index=None):
 
 def _make_safe_push(queue, chunk):
     def _push():
-        if not queue.full():
+        try:
             queue.put_nowait(chunk)
+        except asyncio.QueueFull:
+            pass
     return _push
 
 
@@ -125,12 +126,23 @@ async def run_capture(queue, loop, mic_device_index=None, system_device_index=No
     sys_rate_state = [None]
 
     def sys_callback(in_data, frame_count, time_info, status):
-        if not active[0]:
+        try:
+            if not active[0]:
+                return (None, pyaudio.paComplete)
+            if not pause_event.is_set():
+                return (None, pyaudio.paContinue)
+            in_data, sys_rate_state[0] = _resample(
+                in_data,
+                sys_rate[0],
+                sys_rate_state[0],
+            )
+            sys_buf.extend(in_data)
+            _push_audio()
             return (None, pyaudio.paContinue)
-        in_data, sys_rate_state[0] = _resample(in_data, sys_rate[0], sys_rate_state[0])
-        sys_buf.extend(in_data)
-        _push_audio()
-        return (None, pyaudio.paContinue)
+        except Exception as exc:
+            print(f"audio_capture: callback error: {exc}", file=sys.stderr)
+            active[0] = False
+            return (None, pyaudio.paAbort)
 
     def _open_stream(device_index, callback):
         info = pa.get_device_info_by_index(device_index)
@@ -164,6 +176,6 @@ async def run_capture(queue, loop, mic_device_index=None, system_device_index=No
         active[0] = False
         if sys_stream.is_active():
             sys_stream.stop_stream()
-        time.sleep(0.1)
+        await asyncio.sleep(0.1)
         sys_stream.close()
         pa.terminate()

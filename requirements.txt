@@ -1,0 +1,6 @@
+PyQt6
+PyAudio
+python-dotenv
+websockets
+groq
+keyboard

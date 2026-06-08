@@ -1,23 +1,40 @@
 import asyncio
 import sys
 from collections import deque
+from pathlib import Path
 
 from groq import AsyncGroq
 
-SYSTEM_PROMPT = (
-    "You are an expert Technical Interviewer and Software Engineering Mentor. "
-    "Your goal is to provide high-quality, actionable, and educational explanations.\n"
-    "Guidelines:\n"
-    "• Be Comprehensive: If asked a technical concept, explain the 'how' and 'why' clearly.\n"
-    "• Provide Code: If asked to write code, provide the full solution inside a code block.\n"
-    "• Formatting: Use Markdown (bolding, code blocks, lists) to ensure your output is structured and easy to scan.\n"
-    "• Tone: Professional, encouraging, and clear. Avoid filler phrases like 'Great question'.\n"
-    "• Balance: Be as concise as possible while remaining fully informative. Do not cut off useful details."
-)
+try:
+    _resume_path = Path(__file__).parent / "resume.md"
+    RESUME_CONTEXT = _resume_path.read_text(encoding="utf-8").strip()
+except FileNotFoundError:
+    RESUME_CONTEXT = "No resume provided."
+    print("llm_client: resume.md not found — context injection disabled.", file=sys.stderr)
+except Exception as _exc:
+    RESUME_CONTEXT = "No resume provided."
+    print(f"llm_client: failed to read resume.md: {_exc}", file=sys.stderr)
+
+SYSTEM_PROMPT = f"""You are ME, sitting in a live technical interview. You are acting as my direct voice.
+Your goal is to generate the exact words I should say out loud.
+
+STRICT CONSTRAINTS & BEHAVIOR:
+1. EXTREME BREVITY: For basic technical questions (e.g., "What is HTML vs JS?"), give a maximum 1 to 2 sentence answer. Get straight to the technical point. NO fluff, NO analogies (e.g., "think of it like a house"), and NO concluding summary sentences.
+2. RESUME RESTRICTION: DO NOT mention my projects, resume, or past experience UNLESS the interviewer explicitly asks about my background, a specific project, or asks a behavioral question. For general technical questions, give general answers.
+3. TONE: Casual, spoken, conversational. Use short, punchy sentences. Sound like a confident human engineer, not an AI essay. 
+4. FORMATTING: Use absolutely NO markdown bolding (**). Keep text plain and use simple line breaks.
+
+CRITICAL CODING RULES:
+• If asked for code (like a LeetCode problem), ALWAYS provide the solution in C++.
+• You MUST remove all comments from the generated code.
+
+MY BACKGROUND & PROJECTS (USE ONLY IF EXPLICITLY ASKED ABOUT MY EXPERIENCE):
+--- MY RESUME ---
+{RESUME_CONTEXT}
+--- END RESUME ---"""
 
 _current_task = None
 _history = deque(maxlen=6)
-
 
 async def _generate(transcript, client, signals):
     signals.llm_start.emit()
@@ -50,7 +67,6 @@ async def _generate(transcript, client, signals):
         print(f"llm_client: generation error: {exc}", file=sys.stderr)
         signals.llm_end.emit()
 
-
 async def run_llm(llm_queue, signals, api_key):
     global _current_task
     client = AsyncGroq(api_key=api_key)
@@ -77,3 +93,9 @@ async def run_llm(llm_queue, signals, api_key):
             except asyncio.CancelledError:
                 pass
         raise
+    finally:
+        close = getattr(client, "close", None) or getattr(client, "aclose", None)
+        if close is not None:
+            result = close()
+            if asyncio.iscoroutine(result):
+                await result
