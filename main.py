@@ -2,14 +2,14 @@ import sys
 import asyncio
 import threading
 import os
-from dotenv import load_dotenv
 
 from PyQt6.QtWidgets import QApplication
 
-from main_ui import MainWindow, signals, hotkey_signals
+from main_ui import MainWindow, SettingsDialog, signals, hotkey_signals
 import audio_capture
 import stt_client
 import llm_client
+import config
 
 try:
     import keyboard
@@ -61,23 +61,30 @@ def on_quit():
     async_thread.join(timeout=2)
 
 if __name__ == "__main__":
-    load_dotenv()
-    DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
-    GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+    app = QApplication(sys.argv)
 
-    if not DEEPGRAM_API_KEY:
-        print("ERROR: DEEPGRAM_API_KEY environment variable is not set.", file=sys.stderr)
+    # --- 1. CONFIGURATION CHECK ---
+    keys = config.load_config()
+    DEEPGRAM_API_KEY = keys.get("DEEPGRAM_API_KEY", "")
+    GROQ_API_KEY = keys.get("GROQ_API_KEY", "")
+
+    # If keys are missing, launch the Settings UI before the main window
+    if not DEEPGRAM_API_KEY or not GROQ_API_KEY:
+        dialog = SettingsDialog()
+        if dialog.exec() == 1:  # 1 means the user clicked Save/Accepted
+            keys = config.load_config()
+            DEEPGRAM_API_KEY = keys.get("DEEPGRAM_API_KEY", "")
+            GROQ_API_KEY = keys.get("GROQ_API_KEY", "")
+
+    # If the user closed the dialog without saving keys, abort launch
+    if not DEEPGRAM_API_KEY or not GROQ_API_KEY:
+        print("ERROR: API keys are required to run Parakeet.", file=sys.stderr)
         sys.exit(1)
 
-    if not GROQ_API_KEY:
-        print("ERROR: GROQ_API_KEY environment variable is not set.", file=sys.stderr)
-        sys.exit(1)
-
+    # --- 2. MAIN APP LAUNCH ---
     audio_capture.list_audio_devices()
 
     loop = asyncio.new_event_loop()
-
-    app = QApplication(sys.argv)
 
     window = MainWindow()
     window.show()
@@ -95,6 +102,7 @@ if __name__ == "__main__":
         print("main: keyboard module not installed; global hotkeys disabled.", file=sys.stderr)
     else:
         try:
+            keyboard.add_hotkey("f8", lambda: hotkey_signals.open_settings.emit(), suppress=True)
             keyboard.add_hotkey("f9", lambda: hotkey_signals.toggle_pause.emit(), suppress=True)
             keyboard.add_hotkey("f10", lambda: hotkey_signals.clear_ui.emit(), suppress=True)
         except Exception as exc:

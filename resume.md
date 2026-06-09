@@ -1,3 +1,10 @@
+## About Me
+I am a Computer Science undergraduate at Bennett University and a freelance software developer based in New Delhi. I am a disciplined problem solver who loves building real-world applications. My main focus is on full-stack web development using the MERN stack, alongside integrating artificial intelligence. I am also deeply engaged in competitive programming, relying on C++ to solve complex algorithmic challenges.
+
+What makes me a strong hire is my focus on actual production value. I do not just write code; I build complete, working systems. I have built a sign-language recognition tool called Voicify, developed Synex AI, and successfully migrated the TMS Security Services business platform to a modern serverless architecture. I take pride in writing extremely clean, optimized code, and I am ready to bring my work ethic and technical drive to a professional team.
+
+
+
 TMS Security Services (Serverless Platform Migration)Core Identity: A production-grade corporate platform migration from a legacy Node.js/Express backend to a modern, zero-overhead serverless architecture.  Tech Stack: React.js, Vite, Vercel CDN, Cloudinary REST API, Cloudflare Turnstile, EmailJS.  Key Features:Migrated legacy backend to serverless, reducing hosting costs to $0 and improving deployment times by ~40%.  Enabled secure, direct-to-cloud HR document uploads via Cloudinary's Unsigned Upload Presets, bypassing the need for an intermediate server.  Integrated serverless lead generation and bot protection, yielding a 347% week-over-week traffic increase.  Architectural Challenge: Securing file uploads and lead generation entirely on the client side without exposing API secrets, while managing state and ensuring a seamless, low-latency deployment through Vercel's edge network.
 
 
@@ -6,3 +13,11 @@ Synex AI Cognitive Workload Scheduler (MERN Capacity Management System)Core Iden
 
 
 Voicify Real-Time Sign Language Recognition (Computer Vision Translation System)Core Identity: A low-latency computer vision system that translates live American Sign Language gestures into text in real-time.  Tech Stack: Python, TensorFlow, OpenCV.  Key Features:Processed live webcam feeds with under 100ms latency for seamless gesture-to-text translation.  Designed and trained a Convolutional Neural Network (CNN) that achieved 94% classification accuracy across ASL gesture classes.  Integrated a live input pipeline optimized for real-time inference in assistive communication use cases.  Architectural Challenge: Optimizing the webcam frame extraction pipeline via OpenCV and the CNN inference step via TensorFlow to operate concurrently, preventing memory leaks and ensuring the total processing time remained strictly under the 100ms latency threshold.
+
+## Unlisted Recent Project: Guard Grid
+* **Elevator Pitch:** A multi-tenant enterprise web application built to streamline operations, deployment locations, and personnel rosters for TMS Security Services. It provides a secure, centralized dashboard for security administrators to manage dynamic site details and employee assignments with strict data isolation.
+* **Tech Stack:** Frontend: Next.js 15 (App Router), React, Tailwind CSS. Backend: Next.js Server Actions, TypeScript. Database & Auth: Supabase (PostgreSQL), JWT. Architecture: Multi-tenant infrastructure, Row Level Security (RLS).
+* **Key Achievements:** 
+  - Architected a scalable enterprise dashboard using Next.js App Router and Server Actions for highly optimized server-side rendering.
+  - Engineered bulletproof database security using Supabase PostgreSQL with strict Row Level Security (RLS) policies and JWT authentication.
+  - Designed responsive, data-driven management dashboards with Tailwind CSS to track deployment locations and personnel.

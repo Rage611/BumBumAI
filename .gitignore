@@ -9,3 +9,16 @@ env/
 __pycache__/
 *.py[cod]
 *$py.class
+
+# PyInstaller build folders (CRITICAL: Do not upload massive .exe files)
+build/
+dist/
+*.spec
+
+# API Keys and Configs (CRITICAL: Protect your Groq keys)
+config.json
+*.key
+
+# OS generated files
+.DS_Store
+Thumbs.db

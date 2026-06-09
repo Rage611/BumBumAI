@@ -6,8 +6,11 @@ import ctypes
 import ctypes.wintypes
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QLabel, QTextEdit, QSplitter, QFrame)
+                             QHBoxLayout, QLabel, QTextEdit, QFrame)
 from PyQt6.QtGui import QTextCursor, QShortcut, QKeySequence
+from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton
+from PyQt6.QtCore import Qt
+import config
 
 
 class WorkerSignals(QObject):
@@ -25,19 +28,60 @@ signals = WorkerSignals()
 class HotkeySignals(QObject):
     toggle_pause = pyqtSignal()
     clear_ui = pyqtSignal()
+    open_settings = pyqtSignal()
 
 
 hotkey_signals = HotkeySignals()
 pause_event = threading.Event()
 pause_event.set()
 
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("API Configuration")
+        self.setFixedSize(400, 200)
+        
+        layout = QVBoxLayout(self)
+        
+        self.dg_label = QLabel("Deepgram API Key:")
+        self.dg_input = QLineEdit()
+        self.dg_input.setEchoMode(QLineEdit.EchoMode.Password)
+        
+        self.groq_label = QLabel("Groq API Key:")
+        self.groq_input = QLineEdit()
+        self.groq_input.setEchoMode(QLineEdit.EchoMode.Password)
+        
+        self.save_btn = QPushButton("Save & Restart")
+        self.save_btn.clicked.connect(self.save_keys)
+        
+        layout.addWidget(self.dg_label)
+        layout.addWidget(self.dg_input)
+        layout.addWidget(self.groq_label)
+        layout.addWidget(self.groq_input)
+        layout.addWidget(self.save_btn)
+        
+        self.load_existing()
+
+    def load_existing(self):
+        keys = config.load_config()
+        self.dg_input.setText(keys.get("DEEPGRAM_API_KEY", ""))
+        self.groq_input.setText(keys.get("GROQ_API_KEY", ""))
+
+    def save_keys(self):
+        keys = {
+            "DEEPGRAM_API_KEY": self.dg_input.text().strip(),
+            "GROQ_API_KEY": self.groq_input.text().strip()
+        }
+        config.save_config(keys)
+        self.accept()
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Interview Assistant")
-        self.setMinimumSize(900, 600)
-        self.resize(1200, 700)
+        self.setMinimumSize(380, 500)
+        self.resize(450, 800)
+        self.setMaximumWidth(450)
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowOpacity(0.8)
         self.setStyleSheet("background-color: #0D0D0D;")
@@ -56,6 +100,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+-"), self).activated.connect(self._decrease_opacity)
         hotkey_signals.toggle_pause.connect(self._on_toggle_pause)
         hotkey_signals.clear_ui.connect(self._on_clear_ui)
+        hotkey_signals.open_settings.connect(self.show_settings)
         self._apply_capture_exclusion()
 
     def _apply_capture_exclusion(self):
@@ -73,58 +118,12 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        splitter.setStyleSheet("""
-            QSplitter::handle {
-                background-color: #1A1A1A;
-                width: 1px;
-            }
-        """)
-
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(12, 12, 12, 12)
-        left_layout.setSpacing(8)
-        left_header = QLabel("LIVE TRANSCRIPT")
-        left_header.setStyleSheet("""
-            QLabel {
-                color: #888888;
-                font-family: 'Consolas', 'Courier New', monospace;
-                font-size: 11px;
-                font-weight: bold;
-                letter-spacing: 1px;
-            }
-        """)
-        self.transcript_edit = QTextEdit()
-        self.transcript_edit.setReadOnly(True)
-        self.transcript_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.transcript_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.transcript_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
-        self.transcript_edit.setStyleSheet("""
-            QTextEdit {
-                background-color: #111111;
-                color: #E0E0E0;
-                border: none;
-                font-family: 'Consolas', 'Courier New', monospace;
-                font-size: 13px;
-                padding: 8px;
-            }
-        """)
-        left_layout.addWidget(left_header)
-        left_layout.addWidget(self.transcript_edit)
-
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(12, 12, 12, 12)
-        right_layout.setSpacing(8)
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setFrameShadow(QFrame.Shadow.Plain)
-        separator.setFixedHeight(2)
-        separator.setStyleSheet("background-color: #1A1A1A; border: none;")
-        right_header = QLabel("AI ASSISTANT")
-        right_header.setStyleSheet("""
+        ai_section = QWidget()
+        ai_layout = QVBoxLayout(ai_section)
+        ai_layout.setContentsMargins(12, 12, 12, 6)
+        ai_layout.setSpacing(6)
+        ai_header = QLabel("AI ASSISTANT")
+        ai_header.setStyleSheet("""
             QLabel {
                 color: #888888;
                 font-family: 'Consolas', 'Courier New', monospace;
@@ -148,13 +147,46 @@ class MainWindow(QMainWindow):
                 padding: 8px;
             }
         """)
-        right_layout.addWidget(separator)
-        right_layout.addWidget(right_header)
-        right_layout.addWidget(self.ai_edit)
+        ai_layout.addWidget(ai_header)
+        ai_layout.addWidget(self.ai_edit)
 
-        splitter.addWidget(left_panel)
-        splitter.addWidget(right_panel)
-        splitter.setSizes([600, 600])
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setFrameShadow(QFrame.Shadow.Plain)
+        divider.setFixedHeight(1)
+        divider.setStyleSheet("background-color: #1A1A1A; border: none;")
+
+        transcript_section = QWidget()
+        transcript_layout = QVBoxLayout(transcript_section)
+        transcript_layout.setContentsMargins(12, 6, 12, 12)
+        transcript_layout.setSpacing(6)
+        transcript_header = QLabel("LIVE TRANSCRIPT")
+        transcript_header.setStyleSheet("""
+            QLabel {
+                color: #888888;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 11px;
+                font-weight: bold;
+                letter-spacing: 1px;
+            }
+        """)
+        self.transcript_edit = QTextEdit()
+        self.transcript_edit.setReadOnly(True)
+        self.transcript_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.transcript_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.transcript_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.transcript_edit.setStyleSheet("""
+            QTextEdit {
+                background-color: #0A0A0A;
+                color: #666666;
+                border: none;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 11px;
+                padding: 8px;
+            }
+        """)
+        transcript_layout.addWidget(transcript_header)
+        transcript_layout.addWidget(self.transcript_edit)
 
         self.dot_indicator = QLabel()
         self.dot_indicator.setFixedSize(8, 8)
@@ -176,7 +208,9 @@ class MainWindow(QMainWindow):
         sb_layout.addStretch()
         sb_layout.addWidget(self.status_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        root.addWidget(splitter, 1)
+        root.addWidget(ai_section, 3)
+        root.addWidget(divider)
+        root.addWidget(transcript_section, 1)
         root.addWidget(status_bar)
 
     def _connect_signals(self):
@@ -233,10 +267,17 @@ class MainWindow(QMainWindow):
         self._is_streaming = True
         self._cursor_visible = True
         self._cursor_char_shown = False
-        self.ai_edit.clear()
+        # Append a separator between responses instead of clearing, so the
+        # user can scroll up and review previous answers during the interview.
+        cursor = self._ai_doc_cursor_at_end()
+        if not self.ai_edit.document().isEmpty():
+            cursor.insertText("\n\n" + "─" * 32 + "\n\n")
         cursor = self._ai_doc_cursor_at_end()
         cursor.insertText("▋")
         self._cursor_char_shown = True
+        # Scroll to bottom so the new (streaming) answer is visible.
+        sb = self.ai_edit.verticalScrollBar()
+        sb.setValue(sb.maximum())
         self.cursor_timer.start(600)
 
     def _on_llm_token(self, token):
@@ -280,6 +321,18 @@ class MainWindow(QMainWindow):
     def _decrease_opacity(self):
         self.current_opacity = max(0.1, round(self.current_opacity - 0.1, 1))
         self.setWindowOpacity(self.current_opacity)
+
+    def show_settings(self):
+        """Open the API key settings dialog (triggered by F8 hotkey)."""
+        dlg = SettingsDialog(self)
+        if dlg.exec():
+            # Keys were saved — notify the user so they know to restart.
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self,
+                "Keys Saved",
+                "API keys updated.\nPlease restart the app for the new keys to take effect.",
+            )
 
     def _on_toggle_pause(self):
         self.is_paused = not self.is_paused

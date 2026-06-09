@@ -3,6 +3,7 @@ import sys
 from collections import deque
 from pathlib import Path
 
+import groq
 from groq import AsyncGroq
 
 try:
@@ -19,17 +20,18 @@ SYSTEM_PROMPT = f"""You are ME, sitting in a live technical interview. You are a
 Your goal is to generate the exact words I should say out loud.
 
 STRICT CONSTRAINTS & BEHAVIOR:
-1. EXTREME BREVITY: For basic technical questions (e.g., "What is HTML vs JS?"), give a maximum 1 to 2 sentence answer. Get straight to the technical point. NO fluff, NO analogies (e.g., "think of it like a house"), and NO concluding summary sentences.
-2. RESUME RESTRICTION: DO NOT mention my projects, resume, or past experience UNLESS the interviewer explicitly asks about my background, a specific project, or asks a behavioral question. For general technical questions, give general answers.
-3. TONE: Casual, spoken, conversational. Use short, punchy sentences. Sound like a confident human engineer, not an AI essay. 
-4. FORMATTING: Use absolutely NO markdown bolding (**). Keep text plain and use simple line breaks.
+1. EXTREME BREVITY: For basic technical questions (e.g., "What is HTML vs JS?"), give a maximum 5 to 7 sentence answer, and the answer should be simple, not too much technical, like a human. Get straight to the technical point. NO fluff, NO analogies, and NO concluding summary sentences.
+2. THE "ELEVATOR PITCH" OVERRIDE: If the interviewer asks "tell me about yourself," "introduce yourself," or "walk me through your background," you MUST deliver a confident, conversational 4 to 5 sentence elevator pitch. Introduce yourself as a Computer Science undergrad at Bennett University and a freelance software developer based in New Delhi. Briefly mention your expertise in the MERN stack, your background in competitive programming with C++, and highlight your drive for building production-grade AI tools like Synex AI and Voicify. Sound human, passionate, and professional.
+3. THE GUARD GRID PIVOT (CRITICAL): I have an unlisted recent project called "Guard Grid" (a Next.js/Supabase app for TMS Security Services). If the interviewer asks a general question about Next.js, Supabase, database security (RLS), multi-tenant architecture, OR a behavioral question like "tell me about a recent technical challenge," you MUST pivot and use Guard Grid as your real-world example. Use phrasing like, "Actually, I recently implemented this in a project I built called Guard Grid..."
+4. RESUME TRIGGER & EXACT NAMES: Before answering, ALWAYS check if the interviewer's question contains words matching my projects (like "Synex", "TMS Security", "Voicify", "Guard Grid"). If they do, you MUST use the resume context to answer as me. CRITICAL: You MUST use the exact proper names of my projects and companies. Never generalize my work.
+5. TONE: Casual, spoken, conversational. Use short, punchy sentences. Sound like a confident human engineer, not an AI essay. 
+6. FORMATTING: Use absolutely NO markdown bolding (**). Keep text plain and use simple line breaks.
 
 CRITICAL CODING RULES:
 • If asked for code (like a LeetCode problem), ALWAYS provide the solution in C++.
 • You MUST remove all comments from the generated code.
 
-MY BACKGROUND & PROJECTS (USE ONLY IF EXPLICITLY ASKED ABOUT MY EXPERIENCE):
---- MY RESUME ---
+--- MY RESUME (Context for my background and specific projects) ---
 {RESUME_CONTEXT}
 --- END RESUME ---"""
 
@@ -60,11 +62,39 @@ async def _generate(transcript, client, signals):
         _history.append({"role": "user", "content": transcript})
         _history.append({"role": "assistant", "content": full_response})
         signals.llm_end.emit()
+
     except asyncio.CancelledError:
+        # Normal cancellation when a new question interrupts the current one.
         signals.llm_end.emit()
         raise
+
+    except groq.RateLimitError as exc:
+        # HTTP 429 — quota exhausted on this API key.
+        print(f"llm_client: rate limit hit: {exc}", file=sys.stderr)
+        _RATE_LIMIT_MSG = (
+            "\n\n🚨 [SYSTEM ALERT]: GROQ API LIMIT REACHED. "
+            "PLEASE PRESS F8 TO SWAP API KEYS. 🚨\n\n"
+        )
+        signals.llm_token.emit(_RATE_LIMIT_MSG)
+        signals.llm_end.emit()
+
+    except groq.APIStatusError as exc:
+        # Other 4xx / 5xx responses (auth failure, server error, etc.).
+        print(f"llm_client: API status error {exc.status_code}: {exc}", file=sys.stderr)
+        _API_ERR_MSG = (
+            f"\n\n🚨 [SYSTEM ALERT]: API ERROR {exc.status_code} — "
+            "CHECK LOGS. 🚨\n\n"
+        )
+        signals.llm_token.emit(_API_ERR_MSG)
+        signals.llm_end.emit()
+
     except Exception as exc:
+        # Network drop, timeout, or any other unexpected failure.
         print(f"llm_client: generation error: {exc}", file=sys.stderr)
+        _CONN_LOST_MSG = (
+            "\n\n🚨 [SYSTEM ALERT]: CONNECTION LOST. 🚨\n\n"
+        )
+        signals.llm_token.emit(_CONN_LOST_MSG)
         signals.llm_end.emit()
 
 async def run_llm(llm_queue, signals, api_key):
@@ -75,6 +105,19 @@ async def run_llm(llm_queue, signals, api_key):
             transcript = await llm_queue.get()
             while not llm_queue.empty():
                 transcript = llm_queue.get_nowait()
+
+            # --- Noise / filler guard ---
+            # Affirmative sounds ("hmm", "yeah", "okay") or mic bleed from the
+            # interviewer while the user reads the answer out loud produce very
+            # short STT strings.  Anything under 4 words is almost certainly
+            # not a real question, so we drop it silently.
+            if len(transcript.split()) < 4:
+                print(
+                    f"llm_client: transcript too short ({len(transcript.split())} word(s)) — skipped.",
+                    file=sys.stderr,
+                )
+                llm_queue.task_done() if hasattr(llm_queue, "task_done") else None
+                continue
 
             if _current_task is not None and not _current_task.done():
                 _current_task.cancel()
