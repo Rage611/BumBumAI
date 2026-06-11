@@ -1,6 +1,7 @@
 import sys
 import html
 import time
+import asyncio
 import threading
 import ctypes
 import ctypes.wintypes
@@ -11,6 +12,8 @@ from PyQt6.QtGui import QTextCursor, QShortcut, QKeySequence
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton
 from PyQt6.QtCore import Qt
 import config
+from vision_capture import VisionThread
+import llm_client
 
 
 class WorkerSignals(QObject):
@@ -29,6 +32,7 @@ class HotkeySignals(QObject):
     toggle_pause = pyqtSignal()
     clear_ui = pyqtSignal()
     open_settings = pyqtSignal()
+    toggle_vision = pyqtSignal()
 
 
 hotkey_signals = HotkeySignals()
@@ -39,7 +43,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("API Configuration")
-        self.setFixedSize(400, 200)
+        self.setFixedSize(400, 260)
         
         layout = QVBoxLayout(self)
         
@@ -50,6 +54,10 @@ class SettingsDialog(QDialog):
         self.groq_label = QLabel("Groq API Key:")
         self.groq_input = QLineEdit()
         self.groq_input.setEchoMode(QLineEdit.EchoMode.Password)
+
+        self.gemini_label = QLabel("Gemini API Key (Vision — F7):")
+        self.gemini_input = QLineEdit()
+        self.gemini_input.setEchoMode(QLineEdit.EchoMode.Password)
         
         self.save_btn = QPushButton("Save & Restart")
         self.save_btn.clicked.connect(self.save_keys)
@@ -58,6 +66,8 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.dg_input)
         layout.addWidget(self.groq_label)
         layout.addWidget(self.groq_input)
+        layout.addWidget(self.gemini_label)
+        layout.addWidget(self.gemini_input)
         layout.addWidget(self.save_btn)
         
         self.load_existing()
@@ -66,11 +76,13 @@ class SettingsDialog(QDialog):
         keys = config.load_config()
         self.dg_input.setText(keys.get("DEEPGRAM_API_KEY", ""))
         self.groq_input.setText(keys.get("GROQ_API_KEY", ""))
+        self.gemini_input.setText(keys.get("GEMINI_API_KEY", ""))
 
     def save_keys(self):
         keys = {
             "DEEPGRAM_API_KEY": self.dg_input.text().strip(),
-            "GROQ_API_KEY": self.groq_input.text().strip()
+            "GROQ_API_KEY": self.groq_input.text().strip(),
+            "GEMINI_API_KEY": self.gemini_input.text().strip(),
         }
         config.save_config(keys)
         self.accept()
@@ -93,6 +105,7 @@ class MainWindow(QMainWindow):
         self.cursor_timer = QTimer(self)
         self.cursor_timer.timeout.connect(self._on_cursor_toggle)
         self.is_paused = False
+        self.vision_active = False
         self._init_ui()
         self._connect_signals()
         self.current_opacity = 0.8
@@ -101,6 +114,11 @@ class MainWindow(QMainWindow):
         hotkey_signals.toggle_pause.connect(self._on_toggle_pause)
         hotkey_signals.clear_ui.connect(self._on_clear_ui)
         hotkey_signals.open_settings.connect(self.show_settings)
+        hotkey_signals.toggle_vision.connect(self.toggle_vision_mode)
+        # --- Vision thread (starts paused; activated via F7) ---
+        self._vision_thread = VisionThread()
+        self._vision_thread.image_captured.connect(self.handle_new_image)
+        self._vision_thread.start()   # thread is alive but is_active=False
         self._apply_capture_exclusion()
 
     def _apply_capture_exclusion(self):
@@ -199,12 +217,26 @@ class MainWindow(QMainWindow):
                 font-size: 10px;
             }
         """)
+        # Vision indicator — hidden by default, shown when vision is active.
+        self.vision_label = QLabel("👁️ VISION ON")
+        self.vision_label.setStyleSheet("""
+            QLabel {
+                color: #00FF88;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 10px;
+                font-weight: bold;
+                padding: 0 6px;
+            }
+        """)
+        self.vision_label.setVisible(False)
+
         status_bar = QWidget()
         status_bar.setFixedHeight(28)
         status_bar.setStyleSheet("background-color: #080808; border: none;")
         sb_layout = QHBoxLayout(status_bar)
         sb_layout.setContentsMargins(12, 0, 12, 0)
         sb_layout.addWidget(self.dot_indicator, 0, Qt.AlignmentFlag.AlignVCenter)
+        sb_layout.addWidget(self.vision_label, 0, Qt.AlignmentFlag.AlignVCenter)
         sb_layout.addStretch()
         sb_layout.addWidget(self.status_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -333,6 +365,71 @@ class MainWindow(QMainWindow):
                 "Keys Saved",
                 "API keys updated.\nPlease restart the app for the new keys to take effect.",
             )
+
+    # ------------------------------------------------------------------
+    # Vision mode
+    # ------------------------------------------------------------------
+
+    def toggle_vision_mode(self):
+        """F7 handler — flip vision on/off and update UI accordingly."""
+        self.vision_active = not self.vision_active
+        self._vision_thread.is_active = self.vision_active
+
+        if self.vision_active:
+            # Green border on the AI text box as a subtle live indicator.
+            self.ai_edit.setStyleSheet("""
+                QTextEdit {
+                    background-color: #111111;
+                    color: #00FF88;
+                    border: 1px solid #00FF88;
+                    font-family: 'Consolas', 'Courier New', monospace;
+                    font-size: 14px;
+                    padding: 8px;
+                }
+            """)
+            self.vision_label.setVisible(True)
+        else:
+            self.ai_edit.setStyleSheet("""
+                QTextEdit {
+                    background-color: #111111;
+                    color: #00FF88;
+                    border: none;
+                    font-family: 'Consolas', 'Courier New', monospace;
+                    font-size: 14px;
+                    padding: 8px;
+                }
+            """)
+            self.vision_label.setVisible(False)
+
+    def handle_new_image(self, base64_image: str):
+        """
+        Called (on the main thread via Qt signal) every time VisionThread
+        emits a new screenshot.  Schedules an async Gemini call on the
+        existing event loop that drives the audio/STT/LLM pipeline.
+        """
+        # Collect the latest spoken text as context for Gemini.
+        audio_ctx = " ".join(self._final_sentences[-2:]) if self._final_sentences else ""
+
+        # Retrieve the shared asyncio loop created in main.py.
+        # We import lazily to avoid a circular dependency at module load time.
+        try:
+            import main as _main_module
+            loop = _main_module.loop
+        except Exception:
+            loop = None
+
+        if loop is None or not loop.is_running():
+            print("main_ui: no running event loop — vision response skipped.", file=sys.stderr)
+            return
+
+        asyncio.run_coroutine_threadsafe(
+            llm_client.generate_vision_response(base64_image, audio_ctx, signals),
+            loop,
+        )
+
+    # ------------------------------------------------------------------
+    # Pause / clear / settings
+    # ------------------------------------------------------------------
 
     def _on_toggle_pause(self):
         self.is_paused = not self.is_paused

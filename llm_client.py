@@ -7,6 +7,14 @@ import groq
 from groq import AsyncGroq
 
 try:
+    import google.generativeai as genai
+    _GENAI_AVAILABLE = True
+except ImportError:
+    genai = None  # type: ignore
+    _GENAI_AVAILABLE = False
+    print("llm_client: 'google-generativeai' not installed — vision disabled.", file=sys.stderr)
+
+try:
     _resume_path = Path(__file__).parent / "resume.md"
     RESUME_CONTEXT = _resume_path.read_text(encoding="utf-8").strip()
 except FileNotFoundError:
@@ -34,6 +42,40 @@ CRITICAL CODING RULES:
 --- MY RESUME (Context for my background and specific projects) ---
 {RESUME_CONTEXT}
 --- END RESUME ---"""
+
+# ---------------------------------------------------------------------------
+# Gemini vision configuration
+# ---------------------------------------------------------------------------
+
+GEMINI_VISION_PROMPT = (
+    "You are a stealth interview assistant. "
+    "Read the provided image of a Google Meet chat or shared screen. "
+    "Identify any coding questions or technical questions. "
+    "Provide the direct answer. "
+    "CRITICAL: If it is a coding question, output ONLY C++ code. "
+    "Remove ALL comments."
+)
+
+# Populated lazily on first vision call (key injected via configure_gemini()).
+_gemini_model = None
+
+
+def configure_gemini(api_key: str) -> None:
+    """Initialise the Gemini client. Call once at startup with the key."""
+    global _gemini_model, _GENAI_AVAILABLE
+    if not _GENAI_AVAILABLE:
+        print("llm_client: google-generativeai unavailable, skipping Gemini init.", file=sys.stderr)
+        return
+    try:
+        genai.configure(api_key=api_key)
+        _gemini_model = genai.GenerativeModel(
+            model_name="gemini-3.5-flash",
+            system_instruction=GEMINI_VISION_PROMPT,
+        )
+        print("llm_client: Gemini 3.5 Flash initialised.", file=sys.stderr)
+    except Exception as exc:
+        print(f"llm_client: Gemini init failed: {exc}", file=sys.stderr)
+
 
 _current_task = None
 _history = deque(maxlen=6)
@@ -96,6 +138,65 @@ async def _generate(transcript, client, signals):
         )
         signals.llm_token.emit(_CONN_LOST_MSG)
         signals.llm_end.emit()
+
+
+async def generate_vision_response(base64_image: str, current_audio_transcript: str, signals) -> None:
+    """
+    Send a base64-encoded screenshot + the current audio transcript to
+    Gemini 1.5 Flash and stream the response tokens to the UI via `signals`.
+
+    Parameters
+    ----------
+    base64_image : str
+        Base64-encoded PNG captured by VisionThread.
+    current_audio_transcript : str
+        The most recent STT transcript — gives Gemini spoken context.
+    signals : WorkerSignals
+        PyQt6 signal emitter for llm_start / llm_token / llm_end.
+    """
+    if not _GENAI_AVAILABLE or _gemini_model is None:
+        signals.llm_token.emit(
+            "\n\n🚨 [VISION]: Gemini not configured. "
+            "Set GEMINI_API_KEY and restart. 🚨\n\n"
+        )
+        return
+
+    import base64 as _b64
+    import google.generativeai as genai
+
+    signals.llm_start.emit()
+    try:
+        image_part = {
+            "mime_type": "image/png",
+            "data": _b64.b64decode(base64_image),
+        }
+        context_text = (
+            f"[Audio context from interviewer]: {current_audio_transcript}"
+            if current_audio_transcript.strip()
+            else "[No audio context available]"
+        )
+
+        # Gemini SDK generate_content_async supports streaming.
+        response = await _gemini_model.generate_content_async(
+            [image_part, context_text],
+            stream=True,
+        )
+
+        async for chunk in response:
+            token = getattr(chunk, "text", None)
+            if token:
+                signals.llm_token.emit(token)
+
+        signals.llm_end.emit()
+
+    except asyncio.CancelledError:
+        signals.llm_end.emit()
+        raise
+    except Exception as exc:
+        print(f"llm_client: vision generation error: {exc}", file=sys.stderr)
+        signals.llm_token.emit(f"\n\n🚨 [VISION ERROR]: {exc} 🚨\n\n")
+        signals.llm_end.emit()
+
 
 async def run_llm(llm_queue, signals, api_key):
     global _current_task

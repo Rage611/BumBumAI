@@ -18,7 +18,7 @@ def load_config():
                 return json.load(f)
         except json.JSONDecodeError:
             pass
-    return {"DEEPGRAM_API_KEY": "", "GROQ_API_KEY": ""}
+    return {"DEEPGRAM_API_KEY": "", "GROQ_API_KEY": "", "GEMINI_API_KEY": ""}
 
 def save_config(keys_dict):
     path = get_config_path()

@@ -20,6 +20,7 @@ loop = None
 async_thread = None
 DEEPGRAM_API_KEY = ""
 GROQ_API_KEY = ""
+GEMINI_API_KEY = ""
 
 def _env_device_index(name):
     value = os.environ.get(name, "").strip()
@@ -67,6 +68,7 @@ if __name__ == "__main__":
     keys = config.load_config()
     DEEPGRAM_API_KEY = keys.get("DEEPGRAM_API_KEY", "")
     GROQ_API_KEY = keys.get("GROQ_API_KEY", "")
+    GEMINI_API_KEY = keys.get("GEMINI_API_KEY", "")
 
     # If keys are missing, launch the Settings UI before the main window
     if not DEEPGRAM_API_KEY or not GROQ_API_KEY:
@@ -98,10 +100,17 @@ if __name__ == "__main__":
 
     asyncio.run_coroutine_threadsafe(_main_pipeline(), loop)
 
+    # Initialise Gemini for vision (no-op if key is absent or SDK missing).
+    if GEMINI_API_KEY:
+        llm_client.configure_gemini(GEMINI_API_KEY)
+    else:
+        print("main: GEMINI_API_KEY not set — vision feature disabled.", file=sys.stderr)
+
     if keyboard is None:
         print("main: keyboard module not installed; global hotkeys disabled.", file=sys.stderr)
     else:
         try:
+            keyboard.add_hotkey("f7", lambda: hotkey_signals.toggle_vision.emit(), suppress=True)
             keyboard.add_hotkey("f8", lambda: hotkey_signals.open_settings.emit(), suppress=True)
             keyboard.add_hotkey("f9", lambda: hotkey_signals.toggle_pause.emit(), suppress=True)
             keyboard.add_hotkey("f10", lambda: hotkey_signals.clear_ui.emit(), suppress=True)
