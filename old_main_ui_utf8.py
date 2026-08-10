@@ -9,10 +9,10 @@ from PyQt6.QtCore import Qt, QObject, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QTextEdit, QFrame)
 from PyQt6.QtGui import QTextCursor, QShortcut, QKeySequence
-from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox
+from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton
 from PyQt6.QtCore import Qt
 import config
-from vision_capture import VisionCapture
+from vision_capture import VisionThread
 import llm_client
 
 
@@ -39,178 +39,57 @@ hotkey_signals = HotkeySignals()
 pause_event = threading.Event()
 pause_event.set()
 
-# Available models grouped by provider
-MODEL_OPTIONS = [
-    # label,                          provider,   model_id
-    ("— None (skip this slot) —",    None,       None),
-    ("GPT-5.6 Luna  (OpenAI)",       "openai",   "gpt-5.6-luna"),
-    ("GPT-4o  (OpenAI)",             "openai",   "gpt-4o"),
-    ("GPT-4o Mini  (OpenAI)",        "openai",   "gpt-4o-mini"),
-    ("Llama 3.3 70B  (Groq)",        "groq",     "llama-3.3-70b-versatile"),
-    ("Llama 3.1 8B — Fast  (Groq)",  "groq",     "llama-3.1-8b-instant"),
-]
-
-# Default chain order used when no config exists
-DEFAULT_CHAIN = [
-    ("openai", "gpt-5.6-luna"),
-    ("groq",   "llama-3.3-70b-versatile"),
-    ("groq",   "llama-3.1-8b-instant"),
-    ("openai", "gpt-4o-mini"),
-]
-
-
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Settings")
-        self.setFixedSize(440, 520)
-
+        self.setWindowTitle("API Configuration")
+        self.setFixedSize(400, 260)
+        
         layout = QVBoxLayout(self)
-        layout.setSpacing(8)
-
-        # --- API Keys ---
-        layout.addWidget(QLabel("Groq API Key:"))
+        
+        self.dg_label = QLabel("Deepgram API Key:")
+        self.dg_input = QLineEdit()
+        self.dg_input.setEchoMode(QLineEdit.EchoMode.Password)
+        
+        self.groq_label = QLabel("Groq API Key:")
         self.groq_input = QLineEdit()
         self.groq_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.groq_input.setPlaceholderText("gsk_...")
-        layout.addWidget(self.groq_input)
 
-        layout.addWidget(QLabel("OpenAI API Key (Whisper STT + Vision):"))
-        self.openai_input = QLineEdit()
-        self.openai_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.openai_input.setPlaceholderText("sk-proj-...")
-        layout.addWidget(self.openai_input)
-
-        layout.addWidget(QLabel("Deepgram API Key (Streaming STT):"))
-        self.deepgram_input = QLineEdit()
-        self.deepgram_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.deepgram_input.setPlaceholderText("your deepgram key...")
-        layout.addWidget(self.deepgram_input)
-
-        # --- STT Provider ---
-        from PyQt6.QtWidgets import QFrame
-        sep0 = QFrame()
-        sep0.setFrameShape(QFrame.Shape.HLine)
-        sep0.setStyleSheet("color: #333;")
-        layout.addWidget(sep0)
-
-        layout.addWidget(QLabel("Speech-to-Text Provider:"))
-        self.stt_combo = QComboBox()
-        self.stt_combo.addItem("Deepgram Nova-2  (streaming, lower latency)")
-        self.stt_combo.addItem("OpenAI Whisper  (batch, more accurate)")
-        layout.addWidget(self.stt_combo)
-
-        # --- Provider Priority ---
-        from PyQt6.QtWidgets import QFrame
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #333;")
-        layout.addWidget(sep)
-
-        layout.addWidget(QLabel("Failover Priority  (1st = primary, auto-switches on quota):"))
-
-        self.priority_combos: list[QComboBox] = []
-        ranks = ["1st Preference", "2nd Preference", "3rd Preference", "4th Preference"]
-        for rank in ranks:
-            row_widget = QWidget()
-            row = QHBoxLayout(row_widget)
-            row.setContentsMargins(0, 0, 0, 0)
-            lbl = QLabel(rank)
-            lbl.setFixedWidth(110)
-            combo = QComboBox()
-            for label, _, _ in MODEL_OPTIONS:
-                combo.addItem(label)
-            row.addWidget(lbl)
-            row.addWidget(combo)
-            layout.addWidget(row_widget)
-            self.priority_combos.append(combo)
-
-        self.save_btn = QPushButton("Save & Restart App")
+        self.gemini_label = QLabel("Gemini API Key (Vision ΓÇö F7):")
+        self.gemini_input = QLineEdit()
+        self.gemini_input.setEchoMode(QLineEdit.EchoMode.Password)
+        
+        self.save_btn = QPushButton("Save & Restart")
         self.save_btn.clicked.connect(self.save_keys)
+        
+        layout.addWidget(self.dg_label)
+        layout.addWidget(self.dg_input)
+        layout.addWidget(self.groq_label)
+        layout.addWidget(self.groq_input)
+        layout.addWidget(self.gemini_label)
+        layout.addWidget(self.gemini_input)
         layout.addWidget(self.save_btn)
-
+        
         self.load_existing()
 
-    # ------------------------------------------------------------------
-    def _model_index(self, provider: str | None, model_id: str | None) -> int:
-        """Return the combo index for a given (provider, model_id) pair."""
-        for i, (_, p, m) in enumerate(MODEL_OPTIONS):
-            if p == provider and m == model_id:
-                return i
-        return 0  # "None" slot
-
     def load_existing(self):
-        cfg = config.load_config()
-        self.groq_input.setText(cfg.get("GROQ_API_KEY", ""))
-        self.openai_input.setText(cfg.get("OPENAI_API_KEY", ""))
-        self.deepgram_input.setText(cfg.get("DEEPGRAM_API_KEY", ""))
-
-        stt = cfg.get("STT_PROVIDER", "whisper").lower()
-        self.stt_combo.setCurrentIndex(0 if stt == "deepgram" else 1)
-
-        chain = cfg.get("LLM_CHAIN", DEFAULT_CHAIN)
-        # Pad to 4 entries with None if fewer saved
-        chain = list(chain) + [{"provider": None, "model": None}] * 4
-        for i, combo in enumerate(self.priority_combos):
-            entry = chain[i]
-            if isinstance(entry, dict):
-                p, m = entry.get("provider"), entry.get("model")
-            else:
-                p, m = entry[0], entry[1]
-            combo.setCurrentIndex(self._model_index(p, m))
+        keys = config.load_config()
+        self.dg_input.setText(keys.get("DEEPGRAM_API_KEY", ""))
+        self.groq_input.setText(keys.get("GROQ_API_KEY", ""))
+        self.gemini_input.setText(keys.get("GEMINI_API_KEY", ""))
 
     def save_keys(self):
-        from PyQt6.QtWidgets import QMessageBox
-        openai_key = self.openai_input.text().strip()
-        groq_key   = self.groq_input.text().strip()
-
-        # Build the chain from dropdowns
-        chain = []
-        seen = set()
-        for combo in self.priority_combos:
-            idx = combo.currentIndex()
-            _, provider, model_id = MODEL_OPTIONS[idx]
-            if provider is None:
-                continue  # skip "None" slots
-            key = (provider, model_id)
-            if key in seen:
-                QMessageBox.warning(self, "Duplicate",
-                    f"Each model can only appear once.\n'{MODEL_OPTIONS[idx][0]}' is duplicated.")
-                return
-            seen.add(key)
-            # Validate key availability
-            if provider == "openai" and not openai_key:
-                QMessageBox.warning(self, "Missing Key",
-                    f"OpenAI API Key is required for:\n{MODEL_OPTIONS[idx][0]}")
-                return
-            if provider == "groq" and not groq_key:
-                QMessageBox.warning(self, "Missing Key",
-                    f"Groq API Key is required for:\n{MODEL_OPTIONS[idx][0]}")
-                return
-            chain.append({"provider": provider, "model": model_id})
-
-        if not chain:
-            QMessageBox.warning(self, "Empty Chain",
-                "Please select at least one model as 1st preference.")
-            return
-
-        cfg = config.load_config()
-        cfg["GROQ_API_KEY"]     = groq_key
-        cfg["OPENAI_API_KEY"]   = openai_key
-        cfg["DEEPGRAM_API_KEY"] = self.deepgram_input.text().strip()
-        cfg["STT_PROVIDER"]     = "deepgram" if self.stt_combo.currentIndex() == 0 else "whisper"
-        cfg["LLM_CHAIN"]        = chain
-        # Keep LLM_MODEL/LLM_PROVIDER pointing to the primary for status label
-        cfg["LLM_MODEL"]    = chain[0]["model"]
-        cfg["LLM_PROVIDER"] = chain[0]["provider"]
-        config.save_config(cfg)
+        keys = {
+            "DEEPGRAM_API_KEY": self.dg_input.text().strip(),
+            "GROQ_API_KEY": self.groq_input.text().strip(),
+            "GEMINI_API_KEY": self.gemini_input.text().strip(),
+        }
+        config.save_config(keys)
         self.accept()
 
-
 class MainWindow(QMainWindow):
-    def __init__(self, loop=None):
+    def __init__(self):
         super().__init__()
-        self._loop = loop  # asyncio event loop passed from main.py
         self.setWindowTitle("Interview Assistant")
         self.setMinimumSize(380, 500)
         self.resize(450, 800)
@@ -236,9 +115,10 @@ class MainWindow(QMainWindow):
         hotkey_signals.clear_ui.connect(self._on_clear_ui)
         hotkey_signals.open_settings.connect(self.show_settings)
         hotkey_signals.toggle_vision.connect(self.toggle_vision_mode)
-        # --- Vision capture ---
-        self._vision_capture = VisionCapture(parent=self)
-        self._vision_capture.image_captured.connect(self.handle_new_image)
+        # --- Vision thread (starts paused; activated via F7) ---
+        self._vision_thread = VisionThread()
+        self._vision_thread.image_captured.connect(self.handle_new_image)
+        self._vision_thread.start()   # thread is alive but is_active=False
         self._apply_capture_exclusion()
 
     def _apply_capture_exclusion(self):
@@ -329,7 +209,7 @@ class MainWindow(QMainWindow):
         self.dot_indicator = QLabel()
         self.dot_indicator.setFixedSize(8, 8)
         self.dot_indicator.setStyleSheet("background-color: #444444; border-radius: 4px;")
-        self.status_label = QLabel(self._model_label())
+        self.status_label = QLabel("Groq ┬╖ Llama 3.3 70B")
         self.status_label.setStyleSheet("""
             QLabel {
                 color: #555555;
@@ -395,7 +275,7 @@ class MainWindow(QMainWindow):
             return
         cursor = self._ai_doc_cursor_at_end()
         block_text = cursor.block().text()
-        if block_text.endswith("█"):
+        if block_text.endswith("Γûï"):
             cursor.deletePreviousChar()
             self._cursor_char_shown = False
 
@@ -403,7 +283,7 @@ class MainWindow(QMainWindow):
         if self._cursor_char_shown:
             return
         cursor = self._ai_doc_cursor_at_end()
-        cursor.insertText("█")
+        cursor.insertText("Γûï")
         self._cursor_char_shown = True
 
     def _on_interim_transcript(self, text):
@@ -423,9 +303,9 @@ class MainWindow(QMainWindow):
         # user can scroll up and review previous answers during the interview.
         cursor = self._ai_doc_cursor_at_end()
         if not self.ai_edit.document().isEmpty():
-            cursor.insertText("\n\n" + "─" * 32 + "\n\n")
+            cursor.insertText("\n\n" + "ΓöÇ" * 32 + "\n\n")
         cursor = self._ai_doc_cursor_at_end()
-        cursor.insertText("█")
+        cursor.insertText("Γûï")
         self._cursor_char_shown = True
         # Scroll to bottom so the new (streaming) answer is visible.
         sb = self.ai_edit.verticalScrollBar()
@@ -437,7 +317,7 @@ class MainWindow(QMainWindow):
         cursor = self._ai_doc_cursor_at_end()
         cursor.insertText(token)
         if self._is_streaming:
-            cursor.insertText("█")
+            cursor.insertText("Γûï")
             self._cursor_char_shown = True
         sb = self.ai_edit.verticalScrollBar()
         sb.setValue(sb.maximum())
@@ -478,11 +358,13 @@ class MainWindow(QMainWindow):
         """Open the API key settings dialog (triggered by F8 hotkey)."""
         dlg = SettingsDialog(self)
         if dlg.exec():
-            # Settings saved — do a real restart so new model/keys take effect
-            import os
-            python = sys.executable
-            args = [python] + sys.argv
-            os.execv(python, args)
+            # Keys were saved ΓÇö notify the user so they know to restart.
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self,
+                "Keys Saved",
+                "API keys updated.\nPlease restart the app for the new keys to take effect.",
+            )
 
     # ------------------------------------------------------------------
     # Vision mode
@@ -491,8 +373,10 @@ class MainWindow(QMainWindow):
     def toggle_vision_mode(self):
         """F7 handler ΓÇö flip vision on/off and update UI accordingly."""
         self.vision_active = not self.vision_active
+        self._vision_thread.is_active = self.vision_active
+
         if self.vision_active:
-            self._vision_capture.is_active = True
+            # Green border on the AI text box as a subtle live indicator.
             self.ai_edit.setStyleSheet("""
                 QTextEdit {
                     background-color: #111111;
@@ -504,7 +388,6 @@ class MainWindow(QMainWindow):
                 }
             """)
             self.vision_label.setVisible(True)
-            self._vision_capture.dispatch_latest()
         else:
             self.ai_edit.setStyleSheet("""
                 QTextEdit {
@@ -518,23 +401,26 @@ class MainWindow(QMainWindow):
             """)
             self.vision_label.setVisible(False)
 
-    @staticmethod
-    def _model_label() -> str:
-        """Return a human-readable model label for the status bar."""
-        try:
-            cfg = config.load_config()
-            model = cfg.get("LLM_MODEL", "gpt-5.6-luna")
-            provider = cfg.get("LLM_PROVIDER", "openai").upper()
-            return f"{provider} · {model}"
-        except Exception:
-            return "OpenAI · GPT-5.6 Luna"
-
     def handle_new_image(self, base64_image: str):
+        """
+        Called (on the main thread via Qt signal) every time VisionThread
+        emits a new screenshot.  Schedules an async Gemini call on the
+        existing event loop that drives the audio/STT/LLM pipeline.
+        """
+        # Collect the latest spoken text as context for Gemini.
         audio_ctx = " ".join(self._final_sentences[-2:]) if self._final_sentences else ""
 
-        loop = self._loop
+        # Retrieve the shared asyncio loop created in main.py.
+        # We import lazily to avoid a circular dependency at module load time.
+        try:
+            import main as _main_module
+            loop = _main_module.loop
+        except Exception:
+            loop = None
+
         if loop is None or not loop.is_running():
-            return  # loop not ready yet, silently skip
+            print("main_ui: no running event loop ΓÇö vision response skipped.", file=sys.stderr)
+            return
 
         asyncio.run_coroutine_threadsafe(
             llm_client.generate_vision_response(base64_image, audio_ctx, signals),

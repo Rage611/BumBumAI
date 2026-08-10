@@ -1,104 +1,64 @@
-"""
-vision_capture.py
------------------
-Captures a region of the screen on a fixed interval and emits the result
-as a base64-encoded PNG string via a PyQt6 signal.
-
-Default capture region: right half of a 1920×1080 primary monitor.
-Override at instantiation time via the `region` parameter.
-"""
-
 import base64
-import io
+import collections
 import sys
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QTimer, QObject, pyqtSignal, QBuffer, QIODevice
+from PyQt6.QtWidgets import QApplication
 
-try:
-    import mss
-    import mss.tools
-except ImportError:
-    mss = None
-    print("vision_capture: 'mss' not installed — screen capture disabled.", file=sys.stderr)
+BUFFER_INTERVAL_MS = 1500
+BUFFER_SIZE = 3
 
-try:
-    from PIL import Image
-except ImportError:
-    Image = None
-    print("vision_capture: 'Pillow' not installed — screen capture disabled.", file=sys.stderr)
-
-# Default region: right half of a 1920×1080 display.
-_DEFAULT_REGION = {"top": 0, "left": 960, "width": 960, "height": 1080}
-
-# How often (seconds) a new screenshot is taken while active.
-_CAPTURE_INTERVAL_MS = 4000
-
-
-class VisionThread(QThread):
-    """
-    Background thread that takes a screenshot every `interval_ms` milliseconds
-    and emits it as a base64-encoded PNG string.
-
-    Signals
-    -------
-    image_captured(str)
-        Emitted with the base64 PNG string of the captured region.
-        Only emitted when `is_active` is True.
-    """
-
+class VisionCapture(QObject):
     image_captured = pyqtSignal(str)
 
-    def __init__(self, region: dict | None = None, interval_ms: int = _CAPTURE_INTERVAL_MS, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.region = region or _DEFAULT_REGION
-        self.interval_ms = interval_ms
-        # Master switch — flip externally to enable/disable capture without
-        # stopping the thread entirely.
         self.is_active: bool = False
-        self._stop_requested: bool = False
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+        self._buffer: collections.deque[str] = collections.deque(maxlen=BUFFER_SIZE)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._on_tick)
+        self._timer.start(BUFFER_INTERVAL_MS)
 
     def stop(self):
-        """Request the thread loop to exit at the next iteration."""
-        self._stop_requested = True
+        self._timer.stop()
         self.is_active = False
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    def get_latest_frame(self) -> str | None:
+        return self._buffer[-1] if self._buffer else None
+
+    def dispatch_latest(self):
+        frame = self.get_latest_frame()
+        if frame is None:
+            frame = self._capture_base64()
+        if frame:
+            self.image_captured.emit(frame)
+        else:
+            print("vision_capture: no frame available to dispatch.", file=sys.stderr)
+
+    def _on_tick(self):
+        b64 = self._capture_base64()
+        if b64:
+            self._buffer.append(b64)
 
     def _capture_base64(self) -> str | None:
-        """Take one screenshot of `self.region` and return it as base64."""
-        if mss is None or Image is None:
-            print("vision_capture: dependencies missing, skipping capture.", file=sys.stderr)
-            return None
-
         try:
-            with mss.mss() as sct:
-                raw = sct.grab(self.region)
-                # Convert the mss ScreenShot object → PIL Image → PNG bytes
-                img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
-                buf = io.BytesIO()
-                img.save(buf, format="PNG", optimize=True)
-                return base64.b64encode(buf.getvalue()).decode("utf-8")
+            app = QApplication.instance()
+            if app is None:
+                return None
+            screen = app.primaryScreen()
+            if screen is None:
+                return None
+            pixmap = screen.grabWindow(0)
+            if pixmap.isNull():
+                return None
+            if pixmap.width() > 1920:
+                pixmap = pixmap.scaledToWidth(1920)
+            buf = QBuffer()
+            buf.open(QIODevice.OpenModeFlag.WriteOnly)
+            pixmap.save(buf, "JPEG", 85)
+            jpeg_bytes = buf.data().data()
+            buf.close()
+            return base64.b64encode(jpeg_bytes).decode("utf-8")
         except Exception as exc:
             print(f"vision_capture: capture error: {exc}", file=sys.stderr)
             return None
-
-    # ------------------------------------------------------------------
-    # QThread entry point
-    # ------------------------------------------------------------------
-
-    def run(self):
-        """Main loop — runs on the worker thread."""
-        while not self._stop_requested:
-            if self.is_active:
-                b64 = self._capture_base64()
-                if b64:
-                    self.image_captured.emit(b64)
-
-            # Use QThread.msleep so Qt can process events between captures.
-            self.msleep(self.interval_ms)

@@ -1,6 +1,7 @@
 PyQt6
 PyAudio
 python-dotenv
-websockets
 groq
+openai
 keyboard
+deepgram-sdk

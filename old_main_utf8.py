@@ -18,8 +18,9 @@ except ImportError:
 
 loop = None
 async_thread = None
+DEEPGRAM_API_KEY = ""
 GROQ_API_KEY = ""
-OPENAI_API_KEY = ""
+GEMINI_API_KEY = ""
 
 def _env_device_index(name):
     value = os.environ.get(name, "").strip()
@@ -39,7 +40,7 @@ async def _main_pipeline():
     try:
         await asyncio.gather(
             audio_capture.run_capture(audio_queue, loop, mic_device_index, system_device_index),
-            stt_client.run_stt(audio_queue, llm_queue, signals, OPENAI_API_KEY),
+            stt_client.run_stt(audio_queue, llm_queue, signals, DEEPGRAM_API_KEY),
             llm_client.run_llm(llm_queue, signals, GROQ_API_KEY),
         )
     except asyncio.CancelledError:
@@ -63,31 +64,31 @@ def on_quit():
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
+    # --- 1. CONFIGURATION CHECK ---
     keys = config.load_config()
+    DEEPGRAM_API_KEY = keys.get("DEEPGRAM_API_KEY", "")
     GROQ_API_KEY = keys.get("GROQ_API_KEY", "")
-    OPENAI_API_KEY = keys.get("OPENAI_API_KEY", "")
+    GEMINI_API_KEY = keys.get("GEMINI_API_KEY", "")
 
-    if not (OPENAI_API_KEY or GROQ_API_KEY):
+    # If keys are missing, launch the Settings UI before the main window
+    if not DEEPGRAM_API_KEY or not GROQ_API_KEY:
         dialog = SettingsDialog()
-        if dialog.exec() == 1:
+        if dialog.exec() == 1:  # 1 means the user clicked Save/Accepted
             keys = config.load_config()
+            DEEPGRAM_API_KEY = keys.get("DEEPGRAM_API_KEY", "")
             GROQ_API_KEY = keys.get("GROQ_API_KEY", "")
-            OPENAI_API_KEY = keys.get("OPENAI_API_KEY", "")
 
-    if not (OPENAI_API_KEY or GROQ_API_KEY):
-        print("ERROR: OpenAI or Groq API key is required to run Parakeet.", file=sys.stderr)
+    # If the user closed the dialog without saving keys, abort launch
+    if not DEEPGRAM_API_KEY or not GROQ_API_KEY:
+        print("ERROR: API keys are required to run Parakeet.", file=sys.stderr)
         sys.exit(1)
 
+    # --- 2. MAIN APP LAUNCH ---
     audio_capture.list_audio_devices()
-
-    if OPENAI_API_KEY:
-        llm_client.configure_openai(OPENAI_API_KEY)
-    else:
-        print("main: OPENAI_API_KEY not set — vision feature disabled.", file=sys.stderr)
 
     loop = asyncio.new_event_loop()
 
-    window = MainWindow(loop=loop)
+    window = MainWindow()
     window.show()
 
     async_thread = threading.Thread(
@@ -98,6 +99,12 @@ if __name__ == "__main__":
     async_thread.start()
 
     asyncio.run_coroutine_threadsafe(_main_pipeline(), loop)
+
+    # Initialise Gemini for vision (no-op if key is absent or SDK missing).
+    if GEMINI_API_KEY:
+        llm_client.configure_gemini(GEMINI_API_KEY)
+    else:
+        print("main: GEMINI_API_KEY not set ΓÇö vision feature disabled.", file=sys.stderr)
 
     if keyboard is None:
         print("main: keyboard module not installed; global hotkeys disabled.", file=sys.stderr)

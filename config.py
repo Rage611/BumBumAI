@@ -1,26 +1,19 @@
-import os
 import json
+import os
 from pathlib import Path
 
-def get_config_path():
-    app_data = os.getenv("LOCALAPPDATA")
-    if not app_data:
-        app_data = os.path.expanduser("~")
-    config_dir = Path(app_data) / "Parakeet"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    return config_dir / "config.json"
+CONFIG_PATH = Path(__file__).parent / "config.json"
 
-def load_config():
-    path = get_config_path()
-    if path.exists():
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            pass
-    return {"DEEPGRAM_API_KEY": "", "GROQ_API_KEY": "", "GEMINI_API_KEY": ""}
+def load_config() -> dict:
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        return {}
 
-def save_config(keys_dict):
-    path = get_config_path()
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(keys_dict, f)
+def save_config(keys: dict) -> None:
+    # Ensure OPENAI_API_KEY and GROQ_API_KEY are saved.
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(keys, f, indent=4)
