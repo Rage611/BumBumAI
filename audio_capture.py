@@ -57,39 +57,34 @@ def _resample_numpy(data: bytes, input_rate: int, output_rate: int) -> bytes:
 
 def find_wasapi_loopback(pa: pyaudio.PyAudio) -> int | None:
     """
-    Find the WASAPI loopback device for the default output (speakers).
-    PyAudioWPATCH exposes these as input-capable loopback devices.
-    Falls back to searching for 'stereo mix' if no loopback device is found.
+    Find the best WASAPI loopback device.
+    PyAudioWPATCH exposes output devices as [Loopback] input-capable devices.
+    Prefer Speaker loopback (where interviewer audio plays) over Headphone or HDMI.
     """
-    try:
-        # PyAudioWPATCH-specific: get default output device and its loopback
-        default_out = pa.get_default_output_device_info()
-        loopback = pa.get_loopback_device_info_by_output_device_info(default_out)
-        if loopback:
-            idx = loopback.get("index")
-            print(
-                f"audio_capture: WASAPI loopback found: [{idx}] {loopback.get('name')}",
-                file=sys.stderr,
-            )
-            return idx
-    except AttributeError:
-        # Running plain PyAudio (not PyAudioWPATCH) — fall back to stereo mix search
-        pass
-    except Exception as exc:
-        print(f"audio_capture: WASAPI loopback lookup failed: {exc}", file=sys.stderr)
-
-    # Fallback: keyword search for Stereo Mix / What U Hear
     count = pa.get_device_count()
+    loopback_devices = []
+
     for i in range(count):
         info = pa.get_device_info_by_index(i)
-        name = _device_name(info).lower()
-        max_inputs = info.get("maxInputChannels", 0)
-        if max_inputs > 0 and ("stereo" in name and "mix" in name):
-            print(
-                f"audio_capture: Stereo Mix fallback found: [{i}] {_device_name(info)}",
-                file=sys.stderr,
-            )
-            return i
+        if info.get("isLoopbackDevice", False) and info.get("maxInputChannels", 0) > 0:
+            loopback_devices.append((i, info.get("name", "")))
+
+    if not loopback_devices:
+        # Fallback: search for Stereo Mix
+        for i in range(count):
+            info = pa.get_device_info_by_index(i)
+            name = _device_name(info).lower()
+            if info.get("maxInputChannels", 0) > 0 and "stereo" in name and "mix" in name:
+                print(f"audio_capture: Stereo Mix fallback: [{i}] {_device_name(info)}", file=sys.stderr)
+                return i
+        return None
+
+    # Prefer Speaker loopback, then Headphone, then anything
+    for priority_keyword in ("speaker", "headphone", ""):
+        for idx, name in loopback_devices:
+            if priority_keyword in name.lower():
+                print(f"audio_capture: WASAPI loopback selected: [{idx}] {name!r}", file=sys.stderr)
+                return idx
     return None
 
 
