@@ -60,6 +60,7 @@ VISION_PROMPT = (
     "  If E (BEHAVIORAL): Output a confident, first-person spoken answer.\n"
     "  If F (UNCLEAR): Describe what you see on screen and answer concisely.\n\n"
     "CRITICAL RULES:\n"
+    "- TELEPROMPTER FORMATTING: You MUST insert a double line break (\\n\\n) after EVERY SINGLE SENTENCE. Write in short, bite-sized fragments so I can naturally pause and breathe. Do NOT write long paragraphs!\n"
     "- Do NOT use markdown bolding (**). Keep text plain.\n"
 )
 
