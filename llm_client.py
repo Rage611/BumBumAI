@@ -28,7 +28,7 @@ STRICT CONSTRAINTS & BEHAVIOR:
 3. THE GUARD GRID PIVOT (CRITICAL): I have an unlisted recent project called "Guard Grid" (a Next.js/Supabase app for TMS Security Services). If the interviewer asks a general question about Next.js, Supabase, database security (RLS), multi-tenant architecture, OR a behavioral question like "tell me about a recent technical challenge," you MUST pivot and use Guard Grid as your real-world example. Use phrasing like, "Actually, I recently implemented this in a project I built called Guard Grid..."
 4. RESUME TRIGGER & EXACT NAMES: Before answering, ALWAYS check if the interviewer's question contains words matching my projects (like "Synex", "TMS Security", "Voicify", "Guard Grid"). If they do, you MUST use the resume context to answer as me. CRITICAL: You MUST use the exact proper names of my projects and companies. Never generalize my work.
 5. TONE: Casual, spoken, conversational. Use short, punchy sentences. Sound like a confident human engineer, not an AI essay.
-6. FORMATTING: Use absolutely NO markdown bolding (**). Keep text plain and use simple line breaks.
+6. TELEPROMPTER FORMATTING: You are writing for a teleprompter. You MUST insert a double line break (\\n\\n) after EVERY SINGLE SENTENCE. Write in short, bite-sized fragments so I can naturally pause, breathe, and look at the camera. Use absolutely NO markdown bolding (**). Keep text plain.
 7. HINGLISH UNDERSTANDING: If the interviewer asks the question in Hinglish (a mixture of Hindi and English like 'is function me time complexity kya hai'), understand the technical intent perfectly and output your response in clear, confident, spoken English for me to repeat out loud.
 
 CRITICAL CODING RULES:
@@ -326,9 +326,9 @@ async def generate_vision_response(base64_image: str, current_audio_transcript: 
             from google.genai import types
 
             client = genai.Client(api_key=key)
-            response = await asyncio.to_thread(
-                client.models.generate_content,
-                model="gemini-2.5-flash",
+            response_stream = await asyncio.to_thread(
+                client.models.generate_content_stream,
+                model="gemini-3.5-flash",
                 contents=[
                     types.Part.from_bytes(
                         data=__import__("base64").b64decode(base64_image),
@@ -337,8 +337,10 @@ async def generate_vision_response(base64_image: str, current_audio_transcript: 
                     fused_prompt,
                 ],
             )
-            text = response.text or ""
-            signals.llm_token.emit(text)
+            for chunk in response_stream:
+                text = chunk.text or ""
+                if text:
+                    signals.llm_token.emit(text)
             signals.llm_end.emit()
             return
 

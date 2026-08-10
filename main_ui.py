@@ -121,7 +121,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(groq_box)
 
         # --- Google AI Studio Keys ---
-        google_label = QLabel("Google AI Studio Keys  (for Vision — Gemini 2.5 Flash, free)")
+        google_label = QLabel("Google AI Studio Keys  (for Vision — Gemini 3.5 Flash, free)")
         google_label.setObjectName("section_label")
         layout.addWidget(google_label)
 
