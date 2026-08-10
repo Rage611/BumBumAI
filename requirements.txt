@@ -1,7 +1,9 @@
 PyQt6
-PyAudio
-python-dotenv
+PyAudioWPATCH
+numpy
+faster-whisper
+webrtcvad
 groq
-openai
+google-genai
 keyboard
-deepgram-sdk
+python-dotenv

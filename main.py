@@ -16,10 +16,10 @@ try:
 except ImportError:
     keyboard = None
 
+
 loop = None
 async_thread = None
-GROQ_API_KEY = ""
-OPENAI_API_KEY = ""
+
 
 def _env_device_index(name):
     value = os.environ.get(name, "").strip()
@@ -31,22 +31,23 @@ def _env_device_index(name):
         print(f"WARNING: {name} must be a number; ignoring {value!r}", file=sys.stderr)
         return None
 
-async def _main_pipeline():
+
+async def _main_pipeline(groq_keys: list[str]):
     audio_queue = asyncio.Queue(maxsize=200)
     llm_queue = asyncio.Queue(maxsize=10)
-    mic_device_index = _env_device_index("MIC_DEVICE_INDEX")
     system_device_index = _env_device_index("SYSTEM_DEVICE_INDEX")
     try:
         await asyncio.gather(
-            audio_capture.run_capture(audio_queue, loop, mic_device_index, system_device_index),
-            stt_client.run_stt(audio_queue, llm_queue, signals, OPENAI_API_KEY),
-            llm_client.run_llm(llm_queue, signals, GROQ_API_KEY),
+            audio_capture.run_capture(audio_queue, loop, None, system_device_index),
+            stt_client.run_stt(audio_queue, llm_queue, signals),
+            llm_client.run_llm(llm_queue, signals, groq_keys),
         )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         print(f"main: pipeline error: {exc}", file=sys.stderr)
         signals.status_update.emit("disconnected")
+
 
 def on_quit():
     async def shutdown():
@@ -60,30 +61,31 @@ def on_quit():
         keyboard.unhook_all_hotkeys()
     async_thread.join(timeout=2)
 
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
     keys = config.load_config()
-    GROQ_API_KEY = keys.get("GROQ_API_KEY", "")
-    OPENAI_API_KEY = keys.get("OPENAI_API_KEY", "")
+    groq_keys = keys.get("GROQ_API_KEYS", [keys.get("GROQ_API_KEY", "")])
+    google_keys = keys.get("GOOGLE_API_KEYS", [])
 
-    if not (OPENAI_API_KEY or GROQ_API_KEY):
+    # Prompt for settings if no keys configured at all
+    if not any(k.strip() for k in groq_keys):
         dialog = SettingsDialog()
         if dialog.exec() == 1:
             keys = config.load_config()
-            GROQ_API_KEY = keys.get("GROQ_API_KEY", "")
-            OPENAI_API_KEY = keys.get("OPENAI_API_KEY", "")
+            groq_keys = keys.get("GROQ_API_KEYS", [])
+            google_keys = keys.get("GOOGLE_API_KEYS", [])
 
-    if not (OPENAI_API_KEY or GROQ_API_KEY):
-        print("ERROR: OpenAI or Groq API key is required to run Parakeet.", file=sys.stderr)
+    if not any(k.strip() for k in groq_keys):
+        print("ERROR: At least one Groq API key is required to run Parakeet.", file=sys.stderr)
         sys.exit(1)
 
+    # List audio devices for debugging
     audio_capture.list_audio_devices()
 
-    if OPENAI_API_KEY:
-        llm_client.configure_openai(OPENAI_API_KEY)
-    else:
-        print("main: OPENAI_API_KEY not set — vision feature disabled.", file=sys.stderr)
+    # Configure vision (Google Gemini)
+    llm_client.configure_vision(google_keys)
 
     loop = asyncio.new_event_loop()
 
@@ -97,7 +99,7 @@ if __name__ == "__main__":
     )
     async_thread.start()
 
-    asyncio.run_coroutine_threadsafe(_main_pipeline(), loop)
+    asyncio.run_coroutine_threadsafe(_main_pipeline(groq_keys), loop)
 
     if keyboard is None:
         print("main: keyboard module not installed; global hotkeys disabled.", file=sys.stderr)
@@ -111,5 +113,4 @@ if __name__ == "__main__":
             print(f"main: failed to register global hotkeys: {exc}", file=sys.stderr)
 
     app.aboutToQuit.connect(on_quit)
-
     sys.exit(app.exec())

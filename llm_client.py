@@ -3,11 +3,12 @@ import sys
 from collections import deque
 from pathlib import Path
 
-import groq
 from groq import AsyncGroq
-from openai import AsyncOpenAI
 import config as _config
 
+# ---------------------------------------------------------------------------
+# Resume context injection
+# ---------------------------------------------------------------------------
 try:
     _resume_path = Path(__file__).parent / "resume.md"
     RESUME_CONTEXT = _resume_path.read_text(encoding="utf-8").strip()
@@ -40,9 +41,8 @@ CRITICAL CODING RULES:
 
 
 # ---------------------------------------------------------------------------
-# Vision configuration
+# Vision prompt (used by Gemini)
 # ---------------------------------------------------------------------------
-
 VISION_PROMPT = (
     "You are a stealth interview assistant analyzing a screenshot.\n\n"
     "STEP 1 - CLASSIFY: Look at the screenshot and determine the question type:\n"
@@ -54,31 +54,19 @@ VISION_PROMPT = (
     "  F) OTHER / UNCLEAR\n\n"
     "STEP 2 - RESPOND based on your classification:\n"
     "  If A (LEETCODE / ALGORITHM): Output ONLY the optimal C++ solution. No comments. No explanation.\n"
-    "  If B (CODE EXPLANATION / REVIEW): Look for mouse cursor, active cursor line, text selection, or specific code highlighted/pointed at in VS Code/IDE. Output a confident, spoken 3-5 sentence explanation answering what that code snippet does, how it works, and its purpose.\n"
+    "  If B (CODE EXPLANATION / REVIEW): Look for mouse cursor, active cursor line, text selection. Output a confident, spoken 3-5 sentence explanation.\n"
     "  If C (THEORETICAL): Output a concise, spoken-style explanation (4-6 sentences max).\n"
     "  If D (SYSTEM DESIGN): Describe the architecture approach with key components and tradeoffs.\n"
     "  If E (BEHAVIORAL): Output a confident, first-person spoken answer.\n"
     "  If F (UNCLEAR): Describe what you see on screen and answer concisely.\n\n"
     "CRITICAL RULES:\n"
-    "- Look closely for mouse pointer position, highlighted text selection, or active IDE line in VS Code / screen.\n"
-    "- If asked 'what does this code do' or shown an IDE, explain the code logic in spoken first-person voice. Do NOT output raw code unless asked to write code.\n"
     "- Do NOT use markdown bolding (**). Keep text plain.\n"
 )
 
-_openai_api_key = ""
-
-def configure_openai(api_key: str) -> None:
-    global _openai_api_key
-    _openai_api_key = api_key
-    if api_key:
-        print("llm_client: OpenAI configured.", file=sys.stderr)
-
 
 # ---------------------------------------------------------------------------
-# ProviderChain — automatic failover on quota exhaustion
+# Error classification
 # ---------------------------------------------------------------------------
-
-# Error signatures that indicate quota/billing limit (not auth or server errors)
 _QUOTA_ERRORS = (
     "429", "rate_limit", "rate limit", "insufficient_quota",
     "billing_hard_limit", "quota exceeded", "capacity",
@@ -86,15 +74,19 @@ _QUOTA_ERRORS = (
 )
 
 def _is_quota_error(exc: Exception) -> bool:
-    """Return True if this exception looks like a quota/rate-limit hit."""
     msg = str(exc).lower()
     return any(k.lower() in msg for k in _QUOTA_ERRORS)
 
 
+# ---------------------------------------------------------------------------
+# ProviderChain — multi-key rotation then model failover
+# ---------------------------------------------------------------------------
 class ProviderChain:
     """
-    Holds an ordered list of (client, model_name, label) providers.
-    On quota exhaustion, call failover() to advance to the next one.
+    Ordered list of (client, model, label) entries.
+    Multiple entries with different keys for the same model allow per-key rotation:
+      - Groq key1/llama-3.3-70b → Groq key2/llama-3.3-70b → ... → Groq key1/llama-3.1-8b → ...
+    Calling failover() advances to the next entry.
     """
 
     def __init__(self):
@@ -121,11 +113,14 @@ class ProviderChain:
         return self._providers[self._idx]["label"]
 
     def failover(self) -> bool:
-        """Try to advance to the next provider. Returns False if exhausted."""
         if self._idx + 1 >= len(self._providers):
             return False
         self._idx += 1
         return True
+
+    def reset(self) -> None:
+        """Reset to primary provider (call after successful generation)."""
+        self._idx = 0
 
     async def close_all(self):
         for p in self._providers:
@@ -136,68 +131,102 @@ class ProviderChain:
                     await result
 
 
+# ---------------------------------------------------------------------------
+# Chain builder — expands each model into N entries (one per API key)
+# ---------------------------------------------------------------------------
 _DEFAULT_CHAIN = [
-    {"provider": "openai", "model": "gpt-5.6-luna"},
-    {"provider": "groq",   "model": "llama-3.3-70b-versatile"},
-    {"provider": "groq",   "model": "llama-3.1-8b-instant"},
-    {"provider": "openai", "model": "gpt-4o-mini"},
+    {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+    {"provider": "groq", "model": "llama-3.1-8b-instant"},
 ]
 
-def _build_chain(openai_key: str, groq_key: str) -> ProviderChain:
+def _build_chain(groq_keys: list[str]) -> ProviderChain:
     """
-    Build the provider chain in the exact order the user configured
-    in Settings (LLM_CHAIN). Falls back to _DEFAULT_CHAIN if not set.
-    Skips any entry whose required API key is missing.
+    Build the provider chain from config.
+    For each model in LLM_CHAIN, add one entry per available API key.
+    This means key rotation happens before model failover.
     """
     cfg = _config.load_config()
     chain_cfg = cfg.get("LLM_CHAIN", _DEFAULT_CHAIN)
+    valid_groq_keys = [k for k in groq_keys if k.strip()]
 
     chain = ProviderChain()
-    seen: set[str] = set()
+    seen_combos: set[str] = set()
 
     for entry in chain_cfg:
         if isinstance(entry, dict):
             provider = entry.get("provider")
-            model    = entry.get("model")
+            model = entry.get("model")
         else:
             provider, model = entry[0], entry[1]
 
         if not provider or not model:
             continue
 
-        key_id = f"{provider}:{model}"
-        if key_id in seen:
-            continue
-        seen.add(key_id)
-
-        if provider == "openai" and openai_key:
-            label = f"OpenAI {model}"
-            chain.add(AsyncOpenAI(api_key=openai_key), model, label)
-        elif provider == "groq" and groq_key:
-            label = f"Groq {model}"
-            chain.add(AsyncGroq(api_key=groq_key), model, label)
+        if provider == "groq":
+            for i, key in enumerate(valid_groq_keys):
+                combo = f"groq:{model}:key{i}"
+                if combo in seen_combos:
+                    continue
+                seen_combos.add(combo)
+                label = f"Groq {model} (key {i+1})"
+                chain.add(AsyncGroq(api_key=key), model, label)
         else:
-            print(f"llm_client: skipping {provider}/{model} — no key.", file=sys.stderr)
+            print(f"llm_client: unknown provider '{provider}' — skipping.", file=sys.stderr)
 
     return chain
 
 
+# ---------------------------------------------------------------------------
+# Conversation history with rolling summary
+# ---------------------------------------------------------------------------
+_history: deque = deque(maxlen=20)   # 10 full Q&A exchanges
+_chain: ProviderChain | None = None
+_current_task: asyncio.Task | None = None
+_groq_keys: list[str] = []
 
-# ---------------------------------------------------------------------------
-# Text LLM generation with per-call failover
-# ---------------------------------------------------------------------------
-_current_task = None
-_history: deque = deque(maxlen=6)
-_chain: ProviderChain | None = None   # set by run_llm at startup
+
+async def _summarize_history() -> str:
+    """Compress the oldest half of history into a single summary message using the LLM."""
+    if _chain is None or _chain.empty:
+        return ""
+    to_summarize = list(_history)[:10]
+    summary_msgs = [
+        {"role": "system", "content": "Summarize the following interview Q&A in 3 concise sentences for context. Be factual and brief."},
+        {"role": "user", "content": str(to_summarize)},
+    ]
+    try:
+        stream = await _chain.client.chat.completions.create(
+            model=_chain.model,
+            messages=summary_msgs,
+            max_tokens=120,
+            stream=True,
+        )
+        summary_text = ""
+        async for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                summary_text += chunk.choices[0].delta.content
+        return summary_text.strip()
+    except Exception:
+        return ""
 
 
 async def _generate(transcript: str, signals) -> None:
-    """Generate a response, auto-failing over providers on quota errors."""
+    """Generate a response, rotating through keys then models on quota errors."""
     global _chain
     if _chain is None or _chain.empty:
         signals.llm_token.emit("\n\n🚨 No LLM providers available. 🚨\n\n")
         signals.llm_end.emit()
         return
+
+    # Rolling summary: if history is full, compress the oldest half
+    if len(_history) >= 20:
+        summary = await _summarize_history()
+        # Remove the oldest 10 messages and replace with summary
+        for _ in range(10):
+            if _history:
+                _history.popleft()
+        if summary:
+            _history.appendleft({"role": "system", "content": f"Earlier interview context (summarized): {summary}"})
 
     signals.llm_start.emit()
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + list(_history)
@@ -205,19 +234,19 @@ async def _generate(transcript: str, signals) -> None:
     full_response = ""
 
     while True:
-        client    = _chain.client
-        model     = _chain.model
-        label     = _chain.label
+        client = _chain.client
+        model = _chain.model
+        label = _chain.label
 
         try:
-            kwargs: dict = {"model": model, "messages": messages, "stream": True}
-            if "llama" in model:
-                kwargs["max_tokens"] = 150
-                kwargs["temperature"] = 0.3
-                kwargs["top_p"] = 0.9
-            else:
-                kwargs["max_completion_tokens"] = 150
-
+            kwargs: dict = {
+                "model": model,
+                "messages": messages,
+                "stream": True,
+                "max_tokens": 150,
+                "temperature": 0.3,
+                "top_p": 0.9,
+            }
             stream = await client.chat.completions.create(**kwargs)
             async for chunk in stream:
                 if not chunk.choices:
@@ -227,10 +256,10 @@ async def _generate(transcript: str, signals) -> None:
                     full_response += token
                     signals.llm_token.emit(token)
 
-            _history.append({"role": "user",      "content": transcript})
-            _history.append({"role": "assistant",  "content": full_response})
+            _history.append({"role": "user", "content": transcript})
+            _history.append({"role": "assistant", "content": full_response})
             signals.llm_end.emit()
-            return  # success — done
+            return  # success
 
         except asyncio.CancelledError:
             signals.llm_end.emit()
@@ -238,102 +267,161 @@ async def _generate(transcript: str, signals) -> None:
 
         except Exception as exc:
             if _is_quota_error(exc):
-                print(f"llm_client: quota hit on {label} — trying next provider.", file=sys.stderr)
+                print(f"llm_client: quota/rate hit on {label} — trying next.", file=sys.stderr)
                 if _chain.failover():
-                    # Notify the UI via a brief inline message
-                    signals.llm_token.emit(
-                        f"\n\n⚡ [Quota hit — switching to {_chain.label}...]\n\n"
-                    )
-                    # Reset response so we start fresh on next provider
+                    signals.llm_token.emit(f"\n\n⚡ [Switching to {_chain.label}...]\n\n")
                     full_response = ""
                     continue
                 else:
-                    signals.llm_token.emit("\n\n🚨 All providers quota-exhausted. 🚨\n\n")
+                    signals.llm_token.emit("\n\n🚨 All providers exhausted. 🚨\n\n")
                     signals.llm_end.emit()
                     return
             else:
-                # Non-quota error (auth, server error, network) — show and stop
-                print(f"llm_client: generation error on {label}: {exc}", file=sys.stderr)
+                print(f"llm_client: error on {label}: {exc}", file=sys.stderr)
                 signals.llm_token.emit(f"\n\n🚨 Error ({label}): {exc} 🚨\n\n")
                 signals.llm_end.emit()
                 return
 
 
+# ---------------------------------------------------------------------------
+# Vision — Google Gemini 2.5 Flash (free tier)
+# ---------------------------------------------------------------------------
+_google_keys: list[str] = []
+_google_key_idx: int = 0
+
+
+def configure_vision(google_keys: list[str]) -> None:
+    global _google_keys
+    _google_keys = [k for k in google_keys if k.strip()]
+    if _google_keys:
+        print(f"llm_client: {len(_google_keys)} Google AI Studio key(s) configured.", file=sys.stderr)
+    else:
+        print("llm_client: No Google API keys — vision disabled.", file=sys.stderr)
+
+
 async def generate_vision_response(base64_image: str, current_audio_transcript: str, signals) -> None:
-    if not _openai_api_key:
-        signals.llm_token.emit("\n\n🚨 [VISION]: OpenAI API Key missing. 🚨\n\n")
+    global _google_key_idx
+
+    if not _google_keys:
+        signals.llm_token.emit("\n\n🚨 [VISION]: No Google API key configured. 🚨\n\n")
         signals.llm_end.emit()
         return
 
     verbal_context = current_audio_transcript.strip() or "No verbal context captured."
     fused_prompt = (
-        "Visual State: [Attached Screenshot]\n\n"
-        f"Verbal Context: {verbal_context}\n\n"
-        "Instruction: Classify the visual content and respond."
+        f"{VISION_PROMPT}\n\n"
+        f"Verbal Context from audio: {verbal_context}\n\n"
+        "Classify the screenshot and respond."
     )
 
     signals.llm_start.emit()
-    client = AsyncOpenAI(api_key=_openai_api_key)
 
-    try:
-        messages = [
-            {"role": "system", "content": VISION_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
-                    {"type": "text", "text": fused_prompt},
+    # Try each Google key in rotation on quota error
+    attempts = 0
+    while attempts < len(_google_keys):
+        key = _google_keys[_google_key_idx % len(_google_keys)]
+        key_label = f"Google key {(_google_key_idx % len(_google_keys)) + 1}"
+        try:
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(api_key=key)
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model="gemini-2.5-flash",
+                contents=[
+                    types.Part.from_bytes(
+                        data=__import__("base64").b64decode(base64_image),
+                        mime_type="image/jpeg",
+                    ),
+                    fused_prompt,
                 ],
-            },
-        ]
-        response = await client.chat.completions.create(
-            model="gpt-5.6-luna",
-            messages=messages,
-            stream=True,
-            max_completion_tokens=300,
-        )
-        async for chunk in response:
-            if not chunk.choices:
+            )
+            text = response.text or ""
+            signals.llm_token.emit(text)
+            signals.llm_end.emit()
+            return
+
+        except asyncio.CancelledError:
+            signals.llm_end.emit()
+            raise
+        except Exception as exc:
+            if _is_quota_error(exc):
+                print(f"llm_client: vision quota on {key_label} — rotating.", file=sys.stderr)
+                _google_key_idx += 1
+                attempts += 1
+                if attempts < len(_google_keys):
+                    signals.llm_token.emit(f"\n\n⚡ [Vision switching to Google key {(_google_key_idx % len(_google_keys)) + 1}...]\n\n")
                 continue
-            token = chunk.choices[0].delta.content
-            if token:
-                signals.llm_token.emit(token)
-        signals.llm_end.emit()
+            else:
+                print(f"llm_client: vision error: {exc}", file=sys.stderr)
+                signals.llm_token.emit(f"\n\n🚨 [VISION ERROR]: {exc} 🚨\n\n")
+                signals.llm_end.emit()
+                return
 
-    except asyncio.CancelledError:
-        signals.llm_end.emit()
-        raise
-    except Exception as exc:
-        print(f"llm_client: vision error: {exc}", file=sys.stderr)
-        signals.llm_token.emit(f"\n\n🚨 [VISION ERROR]: {exc} 🚨\n\n")
-        signals.llm_end.emit()
+    signals.llm_token.emit("\n\n🚨 All Google API keys exhausted for vision. 🚨\n\n")
+    signals.llm_end.emit()
 
 
-async def run_llm(llm_queue, signals, groq_api_key: str):
-    global _current_task, _chain
-
-    _chain = _build_chain(_openai_api_key, groq_api_key)
+# ---------------------------------------------------------------------------
+# Public entry point — debounced LLM runner
+# ---------------------------------------------------------------------------
+async def run_llm(llm_queue: asyncio.Queue, signals, groq_keys: list[str]) -> None:
+    global _current_task, _chain, _groq_keys
+    _groq_keys = groq_keys
+    _chain = _build_chain(groq_keys)
 
     if _chain.empty:
-        print("llm_client: No API keys available. LLM disabled.", file=sys.stderr)
+        print("llm_client: No valid Groq API keys. LLM disabled.", file=sys.stderr)
         return
 
-    print(f"llm_client: ProviderChain ready — primary: {_chain.label}.", file=sys.stderr)
+    print(f"llm_client: ProviderChain ready — {len(_chain._providers)} slot(s). Primary: {_chain.label}.", file=sys.stderr)
+
+    # Debounce state
+    DEBOUNCE_SECONDS = 1.5
+    accumulated: list[str] = []
+    debounce_task: asyncio.Task | None = None
+
+    async def _fire_after_silence():
+        """Wait for silence, then combine accumulated fragments and fire LLM."""
+        nonlocal accumulated, debounce_task
+        await asyncio.sleep(DEBOUNCE_SECONDS)
+        if not accumulated:
+            return
+        combined = " ".join(accumulated).strip()
+        accumulated = []
+        debounce_task = None
+
+        if len(combined.split()) < 4:
+            return  # too short, ignore
+
+        # Cancel any previous generation
+        global _current_task
+        if _current_task is not None and not _current_task.done():
+            _current_task.cancel()
+            try:
+                await _current_task
+            except asyncio.CancelledError:
+                pass
+
+        _current_task = asyncio.create_task(_generate(combined, signals))
 
     try:
         while True:
             transcript = await llm_queue.get()
-            if len(transcript.split()) < 4:
-                continue
 
-            if _current_task is not None and not _current_task.done():
-                _current_task.cancel()
+            # Accumulate transcript fragment
+            accumulated.append(transcript)
+
+            # Reset the debounce timer
+            if debounce_task is not None and not debounce_task.done():
+                debounce_task.cancel()
                 try:
-                    await _current_task
+                    await asyncio.shield(asyncio.sleep(0))  # yield
                 except asyncio.CancelledError:
                     pass
 
-            _current_task = asyncio.create_task(_generate(transcript, signals))
+            debounce_task = asyncio.create_task(_fire_after_silence())
 
     except asyncio.CancelledError:
         if _current_task is not None and not _current_task.done():

@@ -7,9 +7,10 @@ import ctypes
 import ctypes.wintypes
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QLabel, QTextEdit, QFrame)
+                             QHBoxLayout, QLabel, QTextEdit, QFrame,
+                             QDialog, QLineEdit, QPushButton, QComboBox, QScrollArea,
+                             QGroupBox, QMessageBox)
 from PyQt6.QtGui import QTextCursor, QShortcut, QKeySequence
-from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox
 from PyQt6.QtCore import Qt
 import config
 from vision_capture import VisionCapture
@@ -39,84 +40,131 @@ hotkey_signals = HotkeySignals()
 pause_event = threading.Event()
 pause_event.set()
 
-# Available models grouped by provider
+# Available Groq models
 MODEL_OPTIONS = [
-    # label,                          provider,   model_id
-    ("— None (skip this slot) —",    None,       None),
-    ("GPT-5.6 Luna  (OpenAI)",       "openai",   "gpt-5.6-luna"),
-    ("GPT-4o  (OpenAI)",             "openai",   "gpt-4o"),
-    ("GPT-4o Mini  (OpenAI)",        "openai",   "gpt-4o-mini"),
-    ("Llama 3.3 70B  (Groq)",        "groq",     "llama-3.3-70b-versatile"),
-    ("Llama 3.1 8B — Fast  (Groq)",  "groq",     "llama-3.1-8b-instant"),
+    ("— None (skip this slot) —",    None,    None),
+    ("Llama 3.3 70B  (Groq)",        "groq",  "llama-3.3-70b-versatile"),
+    ("Llama 3.1 8B — Fast  (Groq)",  "groq",  "llama-3.1-8b-instant"),
 ]
 
-# Default chain order used when no config exists
 DEFAULT_CHAIN = [
-    ("openai", "gpt-5.6-luna"),
-    ("groq",   "llama-3.3-70b-versatile"),
-    ("groq",   "llama-3.1-8b-instant"),
-    ("openai", "gpt-4o-mini"),
+    {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+    {"provider": "groq", "model": "llama-3.1-8b-instant"},
 ]
 
+MAX_KEYS = 5  # Max API keys per provider
 
+
+# ---------------------------------------------------------------------------
+# Settings Dialog — multi-key support, no restart required
+# ---------------------------------------------------------------------------
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Settings")
-        self.setFixedSize(440, 520)
+        self.setWindowTitle("Parakeet — Settings")
+        self.setMinimumWidth(480)
+        self.setStyleSheet("""
+            QDialog { background-color: #111; color: #ddd; }
+            QLabel { color: #aaa; font-size: 12px; }
+            QLabel#section_label { color: #00FF88; font-weight: bold; font-size: 13px; margin-top: 8px; }
+            QLineEdit {
+                background: #1a1a1a; color: #eee; border: 1px solid #333;
+                border-radius: 4px; padding: 5px 8px; font-size: 12px;
+            }
+            QLineEdit:focus { border: 1px solid #00FF88; }
+            QPushButton {
+                background: #00FF88; color: #000; border: none;
+                border-radius: 4px; padding: 8px 16px; font-weight: bold; font-size: 12px;
+            }
+            QPushButton:hover { background: #00cc70; }
+            QComboBox {
+                background: #1a1a1a; color: #eee; border: 1px solid #333;
+                border-radius: 4px; padding: 4px 8px;
+            }
+            QGroupBox {
+                border: 1px solid #2a2a2a; border-radius: 6px;
+                margin-top: 8px; padding: 8px;
+                color: #888; font-size: 11px;
+            }
+            QGroupBox::title { color: #555; }
+        """)
 
-        layout = QVBoxLayout(self)
-        layout.setSpacing(8)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: #111; }")
 
-        # --- API Keys ---
-        layout.addWidget(QLabel("Groq API Key:"))
-        self.groq_input = QLineEdit()
-        self.groq_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.groq_input.setPlaceholderText("gsk_...")
-        layout.addWidget(self.groq_input)
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setSpacing(6)
+        layout.setContentsMargins(16, 16, 16, 16)
 
-        layout.addWidget(QLabel("OpenAI API Key (Whisper STT + Vision):"))
-        self.openai_input = QLineEdit()
-        self.openai_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.openai_input.setPlaceholderText("sk-proj-...")
-        layout.addWidget(self.openai_input)
+        # --- Groq API Keys ---
+        groq_label = QLabel("Groq API Keys  (rotates on rate limit — add up to 5 free keys)")
+        groq_label.setObjectName("section_label")
+        layout.addWidget(groq_label)
 
-        layout.addWidget(QLabel("Deepgram API Key (Streaming STT):"))
-        self.deepgram_input = QLineEdit()
-        self.deepgram_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.deepgram_input.setPlaceholderText("your deepgram key...")
-        layout.addWidget(self.deepgram_input)
+        self.groq_inputs: list[QLineEdit] = []
+        groq_box = QGroupBox("Keys rotate in order: Key 1 → Key 2 → ... → next model")
+        groq_inner = QVBoxLayout(groq_box)
+        groq_inner.setSpacing(4)
+        for i in range(MAX_KEYS):
+            row = QHBoxLayout()
+            lbl = QLabel(f"Key {i+1}:")
+            lbl.setFixedWidth(50)
+            inp = QLineEdit()
+            inp.setEchoMode(QLineEdit.EchoMode.Password)
+            inp.setPlaceholderText(f"gsk_... (slot {i+1})")
+            self.groq_inputs.append(inp)
+            row.addWidget(lbl)
+            row.addWidget(inp)
+            groq_inner.addLayout(row)
+        layout.addWidget(groq_box)
 
-        # --- STT Provider ---
-        from PyQt6.QtWidgets import QFrame
-        sep0 = QFrame()
-        sep0.setFrameShape(QFrame.Shape.HLine)
-        sep0.setStyleSheet("color: #333;")
-        layout.addWidget(sep0)
+        # --- Google AI Studio Keys ---
+        google_label = QLabel("Google AI Studio Keys  (for Vision — Gemini 2.5 Flash, free)")
+        google_label.setObjectName("section_label")
+        layout.addWidget(google_label)
 
-        layout.addWidget(QLabel("Speech-to-Text Provider:"))
-        self.stt_combo = QComboBox()
-        self.stt_combo.addItem("Deepgram Nova-2  (streaming, lower latency)")
-        self.stt_combo.addItem("OpenAI Whisper  (batch, more accurate)")
-        layout.addWidget(self.stt_combo)
+        self.google_inputs: list[QLineEdit] = []
+        google_box = QGroupBox("Keys rotate in order: Key 1 → Key 2 → ... on quota")
+        google_inner = QVBoxLayout(google_box)
+        google_inner.setSpacing(4)
+        for i in range(MAX_KEYS):
+            row = QHBoxLayout()
+            lbl = QLabel(f"Key {i+1}:")
+            lbl.setFixedWidth(50)
+            inp = QLineEdit()
+            inp.setEchoMode(QLineEdit.EchoMode.Password)
+            inp.setPlaceholderText(f"AIza... (slot {i+1})")
+            self.google_inputs.append(inp)
+            row.addWidget(lbl)
+            row.addWidget(inp)
+            google_inner.addLayout(row)
+        layout.addWidget(google_box)
 
-        # --- Provider Priority ---
-        from PyQt6.QtWidgets import QFrame
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #333;")
-        layout.addWidget(sep)
+        # --- Whisper Model ---
+        model_label = QLabel("Local Whisper Model")
+        model_label.setObjectName("section_label")
+        layout.addWidget(model_label)
 
-        layout.addWidget(QLabel("Failover Priority  (1st = primary, auto-switches on quota):"))
+        self.whisper_combo = QComboBox()
+        self.whisper_combo.addItem("base.en  (faster, ~150ms)")
+        self.whisper_combo.addItem("small.en  (more accurate, ~400ms)")
+        layout.addWidget(self.whisper_combo)
+
+        # --- LLM Failover Order ---
+        chain_label = QLabel("LLM Failover Order  (after all keys for a model are exhausted)")
+        chain_label.setObjectName("section_label")
+        layout.addWidget(chain_label)
 
         self.priority_combos: list[QComboBox] = []
-        ranks = ["1st Preference", "2nd Preference", "3rd Preference", "4th Preference"]
+        ranks = ["1st Preference", "2nd Preference"]
         for rank in ranks:
             row_widget = QWidget()
             row = QHBoxLayout(row_widget)
             row.setContentsMargins(0, 0, 0, 0)
             lbl = QLabel(rank)
-            lbl.setFixedWidth(110)
+            lbl.setFixedWidth(120)
             combo = QComboBox()
             for label, _, _ in MODEL_OPTIONS:
                 combo.addItem(label)
@@ -125,32 +173,43 @@ class SettingsDialog(QDialog):
             layout.addWidget(row_widget)
             self.priority_combos.append(combo)
 
-        self.save_btn = QPushButton("Save & Restart App")
-        self.save_btn.clicked.connect(self.save_keys)
+        # --- Save button ---
+        layout.addSpacing(8)
+        self.save_btn = QPushButton("Save  (takes effect immediately — no restart needed)")
+        self.save_btn.clicked.connect(self.save_settings)
         layout.addWidget(self.save_btn)
+
+        scroll.setWidget(container)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
 
         self.load_existing()
 
     # ------------------------------------------------------------------
-    def _model_index(self, provider: str | None, model_id: str | None) -> int:
-        """Return the combo index for a given (provider, model_id) pair."""
+    def _model_index(self, provider, model_id) -> int:
         for i, (_, p, m) in enumerate(MODEL_OPTIONS):
             if p == provider and m == model_id:
                 return i
-        return 0  # "None" slot
+        return 0
 
     def load_existing(self):
         cfg = config.load_config()
-        self.groq_input.setText(cfg.get("GROQ_API_KEY", ""))
-        self.openai_input.setText(cfg.get("OPENAI_API_KEY", ""))
-        self.deepgram_input.setText(cfg.get("DEEPGRAM_API_KEY", ""))
 
-        stt = cfg.get("STT_PROVIDER", "whisper").lower()
-        self.stt_combo.setCurrentIndex(0 if stt == "deepgram" else 1)
+        groq_keys = cfg.get("GROQ_API_KEYS", [""] * MAX_KEYS)
+        for i, inp in enumerate(self.groq_inputs):
+            inp.setText(groq_keys[i] if i < len(groq_keys) else "")
+
+        google_keys = cfg.get("GOOGLE_API_KEYS", [""] * MAX_KEYS)
+        for i, inp in enumerate(self.google_inputs):
+            inp.setText(google_keys[i] if i < len(google_keys) else "")
+
+        whisper = cfg.get("WHISPER_MODEL", "base.en")
+        self.whisper_combo.setCurrentIndex(1 if "small" in whisper else 0)
 
         chain = cfg.get("LLM_CHAIN", DEFAULT_CHAIN)
-        # Pad to 4 entries with None if fewer saved
-        chain = list(chain) + [{"provider": None, "model": None}] * 4
+        chain = list(chain) + [{"provider": None, "model": None}] * len(self.priority_combos)
         for i, combo in enumerate(self.priority_combos):
             entry = chain[i]
             if isinstance(entry, dict):
@@ -159,58 +218,57 @@ class SettingsDialog(QDialog):
                 p, m = entry[0], entry[1]
             combo.setCurrentIndex(self._model_index(p, m))
 
-    def save_keys(self):
-        from PyQt6.QtWidgets import QMessageBox
-        openai_key = self.openai_input.text().strip()
-        groq_key   = self.groq_input.text().strip()
+    def save_settings(self):
+        groq_keys = [inp.text().strip() for inp in self.groq_inputs]
+        google_keys = [inp.text().strip() for inp in self.google_inputs]
 
-        # Build the chain from dropdowns
+        if not any(groq_keys):
+            QMessageBox.warning(self, "Missing Key", "At least one Groq API key is required.")
+            return
+
+        # Build chain from dropdowns
         chain = []
         seen = set()
         for combo in self.priority_combos:
             idx = combo.currentIndex()
             _, provider, model_id = MODEL_OPTIONS[idx]
             if provider is None:
-                continue  # skip "None" slots
+                continue
             key = (provider, model_id)
             if key in seen:
-                QMessageBox.warning(self, "Duplicate",
-                    f"Each model can only appear once.\n'{MODEL_OPTIONS[idx][0]}' is duplicated.")
+                QMessageBox.warning(self, "Duplicate", f"Each model can only appear once.")
                 return
             seen.add(key)
-            # Validate key availability
-            if provider == "openai" and not openai_key:
-                QMessageBox.warning(self, "Missing Key",
-                    f"OpenAI API Key is required for:\n{MODEL_OPTIONS[idx][0]}")
-                return
-            if provider == "groq" and not groq_key:
-                QMessageBox.warning(self, "Missing Key",
-                    f"Groq API Key is required for:\n{MODEL_OPTIONS[idx][0]}")
-                return
             chain.append({"provider": provider, "model": model_id})
 
         if not chain:
-            QMessageBox.warning(self, "Empty Chain",
-                "Please select at least one model as 1st preference.")
-            return
+            chain = DEFAULT_CHAIN
+
+        whisper_model = "small.en" if self.whisper_combo.currentIndex() == 1 else "base.en"
 
         cfg = config.load_config()
-        cfg["GROQ_API_KEY"]     = groq_key
-        cfg["OPENAI_API_KEY"]   = openai_key
-        cfg["DEEPGRAM_API_KEY"] = self.deepgram_input.text().strip()
-        cfg["STT_PROVIDER"]     = "deepgram" if self.stt_combo.currentIndex() == 0 else "whisper"
-        cfg["LLM_CHAIN"]        = chain
-        # Keep LLM_MODEL/LLM_PROVIDER pointing to the primary for status label
-        cfg["LLM_MODEL"]    = chain[0]["model"]
-        cfg["LLM_PROVIDER"] = chain[0]["provider"]
+        cfg["GROQ_API_KEYS"]   = groq_keys
+        cfg["GOOGLE_API_KEYS"] = google_keys
+        cfg["WHISPER_MODEL"]   = whisper_model
+        cfg["LLM_CHAIN"]       = chain
+        cfg["LLM_MODEL"]       = chain[0]["model"]
+        cfg["LLM_PROVIDER"]    = chain[0]["provider"]
         config.save_config(cfg)
+
+        # Apply new keys immediately without restart
+        llm_client.configure_vision(google_keys)
+
+        QMessageBox.information(self, "Saved", "Settings saved and applied!\nGroq key rotation and vision keys are now active.")
         self.accept()
 
 
+# ---------------------------------------------------------------------------
+# Main Window
+# ---------------------------------------------------------------------------
 class MainWindow(QMainWindow):
     def __init__(self, loop=None):
         super().__init__()
-        self._loop = loop  # asyncio event loop passed from main.py
+        self._loop = loop
         self.setWindowTitle("Interview Assistant")
         self.setMinimumSize(380, 500)
         self.resize(450, 800)
@@ -227,6 +285,13 @@ class MainWindow(QMainWindow):
         self.cursor_timer.timeout.connect(self._on_cursor_toggle)
         self.is_paused = False
         self.vision_active = False
+
+        # Token buffer for smooth UI rendering
+        self._token_buffer: list[str] = []
+        self._render_timer = QTimer(self)
+        self._render_timer.timeout.connect(self._flush_token_buffer)
+        self._render_timer.start(33)  # ~30 FPS
+
         self._init_ui()
         self._connect_signals()
         self.current_opacity = 0.8
@@ -236,7 +301,6 @@ class MainWindow(QMainWindow):
         hotkey_signals.clear_ui.connect(self._on_clear_ui)
         hotkey_signals.open_settings.connect(self.show_settings)
         hotkey_signals.toggle_vision.connect(self.toggle_vision_mode)
-        # --- Vision capture ---
         self._vision_capture = VisionCapture(parent=self)
         self._vision_capture.image_captured.connect(self.handle_new_image)
         self._apply_capture_exclusion()
@@ -337,8 +401,7 @@ class MainWindow(QMainWindow):
                 font-size: 10px;
             }
         """)
-        # Vision indicator ΓÇö hidden by default, shown when vision is active.
-        self.vision_label = QLabel("≡ƒæü∩╕Å VISION ON")
+        self.vision_label = QLabel("📷 VISION ON")
         self.vision_label.setStyleSheet("""
             QLabel {
                 color: #00FF88;
@@ -394,8 +457,7 @@ class MainWindow(QMainWindow):
         if not self._cursor_char_shown:
             return
         cursor = self._ai_doc_cursor_at_end()
-        block_text = cursor.block().text()
-        if block_text.endswith("█"):
+        if cursor.block().text().endswith("█"):
             cursor.deletePreviousChar()
             self._cursor_char_shown = False
 
@@ -419,36 +481,43 @@ class MainWindow(QMainWindow):
         self._is_streaming = True
         self._cursor_visible = True
         self._cursor_char_shown = False
-        # Append a separator between responses instead of clearing, so the
-        # user can scroll up and review previous answers during the interview.
+        self._token_buffer.clear()
         cursor = self._ai_doc_cursor_at_end()
         if not self.ai_edit.document().isEmpty():
             cursor.insertText("\n\n" + "─" * 32 + "\n\n")
         cursor = self._ai_doc_cursor_at_end()
         cursor.insertText("█")
         self._cursor_char_shown = True
-        # Scroll to bottom so the new (streaming) answer is visible.
-        sb = self.ai_edit.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self.ai_edit.verticalScrollBar().setValue(self.ai_edit.verticalScrollBar().maximum())
         self.cursor_timer.start(600)
 
     def _on_llm_token(self, token):
+        """Buffer tokens and let the render timer flush them at ~30fps."""
+        self._token_buffer.append(token)
+
+    def _flush_token_buffer(self):
+        """Called every 33ms — flushes buffered tokens to the UI in one shot."""
+        if not self._token_buffer:
+            return
+        text = "".join(self._token_buffer)
+        self._token_buffer.clear()
         self._ai_remove_cursor_char()
         cursor = self._ai_doc_cursor_at_end()
-        cursor.insertText(token)
+        cursor.insertText(text)
         if self._is_streaming:
             cursor.insertText("█")
             self._cursor_char_shown = True
-        sb = self.ai_edit.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self.ai_edit.verticalScrollBar().setValue(self.ai_edit.verticalScrollBar().maximum())
 
     def _on_llm_end(self):
         self._is_streaming = False
         self.cursor_timer.stop()
         self._cursor_visible = False
+        # Flush any remaining buffered tokens
+        if self._token_buffer:
+            self._flush_token_buffer()
         self._ai_remove_cursor_char()
-        sb = self.ai_edit.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self.ai_edit.verticalScrollBar().setValue(self.ai_edit.verticalScrollBar().maximum())
 
     def _on_cursor_toggle(self):
         self._cursor_visible = not self._cursor_visible
@@ -475,21 +544,11 @@ class MainWindow(QMainWindow):
         self.setWindowOpacity(self.current_opacity)
 
     def show_settings(self):
-        """Open the API key settings dialog (triggered by F8 hotkey)."""
         dlg = SettingsDialog(self)
-        if dlg.exec():
-            # Settings saved — do a real restart so new model/keys take effect
-            import os
-            python = sys.executable
-            args = [python] + sys.argv
-            os.execv(python, args)
-
-    # ------------------------------------------------------------------
-    # Vision mode
-    # ------------------------------------------------------------------
+        dlg.exec()
+        # No restart needed — settings applied immediately in save_settings()
 
     def toggle_vision_mode(self):
-        """F7 handler ΓÇö flip vision on/off and update UI accordingly."""
         self.vision_active = not self.vision_active
         if self.vision_active:
             self._vision_capture.is_active = True
@@ -506,6 +565,7 @@ class MainWindow(QMainWindow):
             self.vision_label.setVisible(True)
             self._vision_capture.dispatch_latest()
         else:
+            self._vision_capture.is_active = False
             self.ai_edit.setStyleSheet("""
                 QTextEdit {
                     background-color: #111111;
@@ -520,36 +580,29 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _model_label() -> str:
-        """Return a human-readable model label for the status bar."""
         try:
             cfg = config.load_config()
-            model = cfg.get("LLM_MODEL", "gpt-5.6-luna")
-            provider = cfg.get("LLM_PROVIDER", "openai").upper()
+            model = cfg.get("LLM_MODEL", "llama-3.3-70b-versatile")
+            provider = cfg.get("LLM_PROVIDER", "groq").upper()
             return f"{provider} · {model}"
         except Exception:
-            return "OpenAI · GPT-5.6 Luna"
+            return "GROQ · Llama 3.3 70B"
 
     def handle_new_image(self, base64_image: str):
         audio_ctx = " ".join(self._final_sentences[-2:]) if self._final_sentences else ""
-
         loop = self._loop
         if loop is None or not loop.is_running():
-            return  # loop not ready yet, silently skip
-
+            return
         asyncio.run_coroutine_threadsafe(
             llm_client.generate_vision_response(base64_image, audio_ctx, signals),
             loop,
         )
 
-    # ------------------------------------------------------------------
-    # Pause / clear / settings
-    # ------------------------------------------------------------------
-
     def _on_toggle_pause(self):
         self.is_paused = not self.is_paused
         if self.is_paused:
             pause_event.clear()
-            self.setWindowTitle("Interview Assistant  ΓÅ╕ [PAUSED]")
+            self.setWindowTitle("Interview Assistant  ⏸ [PAUSED]")
             self.dot_indicator.setStyleSheet("background-color: #FF8800; border-radius: 4px;")
         else:
             pause_event.set()
@@ -559,51 +612,9 @@ class MainWindow(QMainWindow):
     def _on_clear_ui(self):
         self._final_sentences = []
         self._current_interim = ""
+        self._token_buffer.clear()
         self.transcript_edit.clear()
         self._is_streaming = False
         self._cursor_char_shown = False
         self.cursor_timer.stop()
         self.ai_edit.clear()
-
-
-if __name__ == "__main__":
-    import threading
-
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-
-    def _demo():
-        time.sleep(1.0)
-        signals.status_update.emit("initializing")
-        time.sleep(1.0)
-        signals.status_update.emit("connected")
-        sentences = [
-            "Can you explain the difference between a process and a thread?",
-            "How does the GIL affect Python concurrency?",
-        ]
-        for sentence in sentences:
-            words = sentence.split()
-            interim = ""
-            for word in words:
-                interim += word + " "
-                signals.interim_transcript.emit(interim.strip())
-                time.sleep(0.12)
-            signals.final_transcript.emit(sentence)
-            time.sleep(0.4)
-            signals.llm_start.emit()
-            time.sleep(0.2)
-            response = (
-                "ΓÇó A process has its own memory space; threads share memory within a process.\n"
-                "ΓÇó Threads are lighter weight but require synchronisation primitives.\n"
-                "ΓÇó Use multiprocessing for CPU-bound work, threads for I/O-bound work."
-            )
-            for token in response.split(" "):
-                signals.llm_token.emit(token + " ")
-                time.sleep(0.08)
-            signals.llm_end.emit()
-            time.sleep(1.2)
-
-    t = threading.Thread(target=_demo, daemon=True)
-    t.start()
-    sys.exit(app.exec())

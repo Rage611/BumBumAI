@@ -1,8 +1,11 @@
 import asyncio
-import audioop
 import sys
+import numpy as np
 from main_ui import pause_event
-import pyaudio
+try:
+    import pyaudiowpatch as pyaudio  # WASAPI loopback support
+except ImportError:
+    import pyaudio  # fallback to plain PyAudio
 
 OUTPUT_SAMPLE_RATE = 16000
 SAMPLE_WIDTH = pyaudio.paInt16
@@ -19,7 +22,9 @@ def list_audio_devices():
         info = pa.get_device_info_by_index(i)
         name = info.get("name", "Unknown")
         max_inputs = info.get("maxInputChannels", 0)
-        print(f"[{i}] {name}  (max input channels: {max_inputs})")
+        is_loopback = info.get("isLoopbackDevice", False)
+        loopback_tag = " [LOOPBACK]" if is_loopback else ""
+        print(f"[{i}] {name}  (max input channels: {max_inputs}){loopback_tag}")
     pa.terminate()
 
 
@@ -31,52 +36,61 @@ def _device_rate(info):
     return int(info.get("defaultSampleRate") or OUTPUT_SAMPLE_RATE)
 
 
-def _can_open_input(pa, device_index):
-    info = pa.get_device_info_by_index(device_index)
-    if info.get("maxInputChannels", 0) < 1:
-        return False
+def _resample_numpy(data: bytes, input_rate: int, output_rate: int) -> bytes:
+    """
+    Drop-in replacement for audioop.ratecv using numpy linear interpolation.
+    Works on Python 3.13+ where audioop has been removed.
+    """
+    if input_rate == output_rate:
+        return data
+    samples = np.frombuffer(data, dtype=np.int16)
+    num_output = int(len(samples) * output_rate / input_rate)
+    if num_output == 0:
+        return b""
+    resampled = np.interp(
+        np.linspace(0, len(samples), num_output, endpoint=False),
+        np.arange(len(samples)),
+        samples,
+    ).astype(np.int16)
+    return resampled.tobytes()
 
+
+def find_wasapi_loopback(pa: pyaudio.PyAudio) -> int | None:
+    """
+    Find the WASAPI loopback device for the default output (speakers).
+    PyAudioWPATCH exposes these as input-capable loopback devices.
+    Falls back to searching for 'stereo mix' if no loopback device is found.
+    """
     try:
-        stream = pa.open(
-            format=SAMPLE_WIDTH,
-            channels=CHANNELS,
-            rate=_device_rate(info),
-            input=True,
-            input_device_index=device_index,
-            frames_per_buffer=FRAMES_PER_BUFFER,
-        )
-        stream.close()
-        return True
-    except OSError:
-        return False
+        # PyAudioWPATCH-specific: get default output device and its loopback
+        default_out = pa.get_default_output_device_info()
+        loopback = pa.get_loopback_device_info_by_output_device_info(default_out)
+        if loopback:
+            idx = loopback.get("index")
+            print(
+                f"audio_capture: WASAPI loopback found: [{idx}] {loopback.get('name')}",
+                file=sys.stderr,
+            )
+            return idx
+    except AttributeError:
+        # Running plain PyAudio (not PyAudioWPATCH) — fall back to stereo mix search
+        pass
+    except Exception as exc:
+        print(f"audio_capture: WASAPI loopback lookup failed: {exc}", file=sys.stderr)
 
-
-def find_input_device(pa, keywords):
+    # Fallback: keyword search for Stereo Mix / What U Hear
     count = pa.get_device_count()
     for i in range(count):
         info = pa.get_device_info_by_index(i)
         name = _device_name(info).lower()
-        if all(keyword in name for keyword in keywords) and _can_open_input(pa, i):
-            return i
-    return None
-
-
-def resolve_system_device(system_device_index=None):
-    pa = pyaudio.PyAudio()
-    try:
-        if system_device_index is not None and not _can_open_input(pa, system_device_index):
+        max_inputs = info.get("maxInputChannels", 0)
+        if max_inputs > 0 and ("stereo" in name and "mix" in name):
             print(
-                f"audio_capture: system device {system_device_index} cannot be opened; auto-selecting",
+                f"audio_capture: Stereo Mix fallback found: [{i}] {_device_name(info)}",
                 file=sys.stderr,
             )
-            system_device_index = None
-
-        if system_device_index is None:
-            system_device_index = find_input_device(pa, ("stereo", "mix"))
-
-        return system_device_index
-    finally:
-        pa.terminate()
+            return i
+    return None
 
 
 def _make_safe_push(queue, chunk):
@@ -89,18 +103,22 @@ def _make_safe_push(queue, chunk):
 
 
 async def run_capture(queue, loop, mic_device_index=None, system_device_index=None):
-    del mic_device_index
+    del mic_device_index  # Not used — system audio only for now
 
     pa = pyaudio.PyAudio()
     active = [True]
 
-    system_device_index = resolve_system_device(system_device_index)
+    if system_device_index is None:
+        system_device_index = find_wasapi_loopback(pa)
 
     if system_device_index is None:
         pa.terminate()
-        raise RuntimeError("No working system audio input device found.")
+        raise RuntimeError(
+            "No WASAPI loopback or Stereo Mix device found. "
+            "Install PyAudioWPATCH or enable Stereo Mix in Windows sound settings."
+        )
 
-    print(f"audio_capture: system device index: {system_device_index}", file=sys.stderr)
+    print(f"audio_capture: capturing from device index: {system_device_index}", file=sys.stderr)
 
     sys_buf = bytearray()
 
@@ -110,33 +128,16 @@ async def run_capture(queue, loop, mic_device_index=None, system_device_index=No
             del sys_buf[:CHUNK_SIZE]
             loop.call_soon_threadsafe(_make_safe_push(queue, chunk))
 
-    def _resample(in_data, input_rate, state):
-        if input_rate == OUTPUT_SAMPLE_RATE:
-            return in_data, state
-        return audioop.ratecv(
-            in_data,
-            BYTES_PER_SAMPLE,
-            CHANNELS,
-            input_rate,
-            OUTPUT_SAMPLE_RATE,
-            state,
-        )
-
-    sys_rate = [OUTPUT_SAMPLE_RATE]
-    sys_rate_state = [None]
-
     def sys_callback(in_data, frame_count, time_info, status):
         try:
             if not active[0]:
                 return (None, pyaudio.paComplete)
             if not pause_event.is_set():
                 return (None, pyaudio.paContinue)
-            in_data, sys_rate_state[0] = _resample(
-                in_data,
-                sys_rate[0],
-                sys_rate_state[0],
-            )
-            sys_buf.extend(in_data)
+            info = pa.get_device_info_by_index(system_device_index)
+            input_rate = _device_rate(info)
+            resampled = _resample_numpy(in_data, input_rate, OUTPUT_SAMPLE_RATE)
+            sys_buf.extend(resampled)
             _push_audio()
             return (None, pyaudio.paContinue)
         except Exception as exc:
@@ -144,28 +145,27 @@ async def run_capture(queue, loop, mic_device_index=None, system_device_index=No
             active[0] = False
             return (None, pyaudio.paAbort)
 
-    def _open_stream(device_index, callback):
-        info = pa.get_device_info_by_index(device_index)
-        rate = _device_rate(info)
-        kwargs = dict(
+    info = pa.get_device_info_by_index(system_device_index)
+    rate = _device_rate(info)
+
+    try:
+        sys_stream = pa.open(
             format=SAMPLE_WIDTH,
             channels=CHANNELS,
             rate=rate,
             input=True,
             frames_per_buffer=FRAMES_PER_BUFFER,
-            stream_callback=callback,
-            input_device_index=device_index,
+            stream_callback=sys_callback,
+            input_device_index=system_device_index,
         )
-        try:
-            return pa.open(**kwargs), rate
-        except OSError as exc:
-            raise RuntimeError(
-                f"Failed to open audio stream on device index {device_index!r}: {exc}"
-            ) from exc
-
-    sys_stream, sys_rate[0] = _open_stream(system_device_index, sys_callback)
+    except OSError as exc:
+        pa.terminate()
+        raise RuntimeError(
+            f"Failed to open audio stream on device {system_device_index!r}: {exc}"
+        ) from exc
 
     sys_stream.start_stream()
+    print("audio_capture: stream started.", file=sys.stderr)
 
     try:
         while True:
@@ -179,3 +179,4 @@ async def run_capture(queue, loop, mic_device_index=None, system_device_index=No
         await asyncio.sleep(0.1)
         sys_stream.close()
         pa.terminate()
+        print("audio_capture: stream closed.", file=sys.stderr)
