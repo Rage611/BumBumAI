@@ -9,7 +9,7 @@ from PyQt6.QtCore import Qt, QObject, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QTextEdit, QFrame,
                              QDialog, QLineEdit, QPushButton, QComboBox, QScrollArea,
-                             QGroupBox, QMessageBox)
+                             QGroupBox, QMessageBox, QProgressBar)
 from PyQt6.QtGui import QTextCursor, QShortcut, QKeySequence
 from PyQt6.QtCore import Qt
 import config
@@ -24,6 +24,7 @@ class WorkerSignals(QObject):
     llm_start = pyqtSignal()
     llm_end = pyqtSignal()
     status_update = pyqtSignal(str)
+    token_usage_update = pyqtSignal(int)
 
 
 signals = WorkerSignals()
@@ -413,6 +414,24 @@ class MainWindow(QMainWindow):
         """)
         self.vision_label.setVisible(False)
 
+        self.usage_bar = QProgressBar()
+        self.usage_bar.setFixedSize(60, 8)
+        self.usage_bar.setTextVisible(False)
+        self.usage_bar.setRange(0, 100)
+        self.usage_bar.setValue(0)
+        self.usage_bar.setToolTip("API Token Quota Usage")
+        self.usage_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #222222;
+                border: none;
+                border-radius: 4px;
+            }
+            QProgressBar::chunk {
+                background-color: #00FF88;
+                border-radius: 4px;
+            }
+        """)
+
         status_bar = QWidget()
         status_bar.setFixedHeight(28)
         status_bar.setStyleSheet("background-color: #080808; border: none;")
@@ -421,6 +440,8 @@ class MainWindow(QMainWindow):
         sb_layout.addWidget(self.dot_indicator, 0, Qt.AlignmentFlag.AlignVCenter)
         sb_layout.addWidget(self.vision_label, 0, Qt.AlignmentFlag.AlignVCenter)
         sb_layout.addStretch()
+        sb_layout.addWidget(self.usage_bar, 0, Qt.AlignmentFlag.AlignVCenter)
+        sb_layout.addSpacing(6)
         sb_layout.addWidget(self.status_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
         root.addWidget(ai_section, 3)
@@ -435,6 +456,16 @@ class MainWindow(QMainWindow):
         signals.llm_start.connect(self._on_llm_start)
         signals.llm_end.connect(self._on_llm_end)
         signals.status_update.connect(self._on_status_update)
+        signals.token_usage_update.connect(self._on_token_usage_update)
+
+    def _on_token_usage_update(self, pct: int):
+        self.usage_bar.setValue(pct)
+        if pct > 85:
+            self.usage_bar.setStyleSheet("QProgressBar { background-color: #222; border: none; border-radius: 4px; } QProgressBar::chunk { background-color: #FF4444; border-radius: 4px; }")
+        elif pct > 60:
+            self.usage_bar.setStyleSheet("QProgressBar { background-color: #222; border: none; border-radius: 4px; } QProgressBar::chunk { background-color: #FF8800; border-radius: 4px; }")
+        else:
+            self.usage_bar.setStyleSheet("QProgressBar { background-color: #222; border: none; border-radius: 4px; } QProgressBar::chunk { background-color: #00FF88; border-radius: 4px; }")
 
     def _render_transcript(self):
         parts = []

@@ -248,6 +248,16 @@ async def _generate(transcript: str, signals) -> None:
                 "top_p": 0.9,
             }
             stream = await client.chat.completions.create(**kwargs)
+            
+            try:
+                limit = int(stream.response.headers.get("x-ratelimit-limit-tokens", 0))
+                remaining = int(stream.response.headers.get("x-ratelimit-remaining-tokens", 0))
+                if limit > 0:
+                    pct = max(0, min(100, int(((limit - remaining) / limit) * 100)))
+                    signals.token_usage_update.emit(pct)
+            except Exception:
+                pass
+
             async for chunk in stream:
                 if not chunk.choices:
                     continue
