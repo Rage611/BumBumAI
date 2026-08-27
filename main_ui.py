@@ -41,16 +41,15 @@ hotkey_signals = HotkeySignals()
 pause_event = threading.Event()
 pause_event.set()
 
-# Available Groq models
 MODEL_OPTIONS = [
     ("— None (skip this slot) —",    None,    None),
-    ("Llama 3.3 70B  (Groq)",        "groq",  "llama-3.3-70b-versatile"),
-    ("Llama 3.1 8B — Fast  (Groq)",  "groq",  "llama-3.1-8b-instant"),
+    ("GPT OSS 120B  (Groq)",        "groq",  "openai/gpt-oss-120b"),
+    ("GPT OSS 20B — Fast  (Groq)",  "groq",  "openai/gpt-oss-20b"),
 ]
 
 DEFAULT_CHAIN = [
-    {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-    {"provider": "groq", "model": "llama-3.1-8b-instant"},
+    {"provider": "groq", "model": "openai/gpt-oss-120b"},
+    {"provider": "groq", "model": "openai/gpt-oss-20b"},
 ]
 
 MAX_KEYS = 5  # Max API keys per provider

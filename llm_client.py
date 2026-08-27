@@ -152,8 +152,8 @@ class ProviderChain:
 # Chain builder — expands each model into N entries (one per API key)
 # ---------------------------------------------------------------------------
 _DEFAULT_CHAIN = [
-    {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-    {"provider": "groq", "model": "llama-3.1-8b-instant"},
+    {"provider": "groq", "model": "openai/gpt-oss-120b"},
+    {"provider": "groq", "model": "openai/gpt-oss-20b"},
 ]
 
 def _build_chain(groq_keys: list[str]) -> ProviderChain:
