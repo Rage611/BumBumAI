@@ -1,46 +1,83 @@
 import asyncio
 import sys
+import io
 import wave
 import struct
 import math
-import tempfile
-import os
 from collections import deque
 
-from openai import AsyncOpenAI
+# ---------------------------------------------------------------------------
+# Faster-Whisper (local, free) — loaded once at startup
+# ---------------------------------------------------------------------------
+try:
+    from faster_whisper import WhisperModel
+    _whisper_model: WhisperModel | None = None
+
+    def _get_whisper_model(model_size: str = "base.en") -> WhisperModel:
+        global _whisper_model
+        if _whisper_model is None:
+            print(f"stt_client: Loading Faster-Whisper model '{model_size}'...", file=sys.stderr)
+            _whisper_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+            print("stt_client: Faster-Whisper model loaded.", file=sys.stderr)
+        return _whisper_model
+
+except ImportError:
+    WhisperModel = None
+    _whisper_model = None
+    print("stt_client: faster-whisper not installed. Run: pip install faster-whisper", file=sys.stderr)
+
+# ---------------------------------------------------------------------------
+# WebRTC VAD — accurate voice activity detection
+# ---------------------------------------------------------------------------
+try:
+    try:
+        import webrtcvad  # original (requires build tools)
+    except ImportError:
+        import webrtcvad_wheels as webrtcvad  # pre-built wheels version
+    _vad_available = True
+except ImportError:
+    webrtcvad = None
+    _vad_available = False
+    print("stt_client: webrtcvad not installed. Falling back to RMS VAD.", file=sys.stderr)
+
 import config as _config
 
 # ---------------------------------------------------------------------------
-# Timing config (Whisper batch mode)
-# Each chunk from audio_capture.py = 1600 samples @ 16000 Hz = 0.1 seconds
+# Timing config
+# Each chunk from audio_capture.py = 1024 samples @ 16000 Hz = 64ms
+# WebRTC VAD needs 10ms, 20ms, or 30ms frames → we use 20ms = 320 samples
 # ---------------------------------------------------------------------------
 
-# End-of-utterance detection config
-# Instead of waiting a fixed window, we fire Whisper the moment the
-# person stops talking (silence after speech).
-MIN_SPEECH_CHUNKS   = 8   # Need at least 0.8s of speech before triggering
-SILENCE_END_CHUNKS  = 5   # 0.5s of silence after speech = end of utterance
-MAX_BUFFER_CHUNKS   = 80  # Rolling 8-second context window (hard cap)
+VAD_FRAME_SAMPLES     = 320          # 20ms @ 16kHz
+VAD_FRAME_BYTES       = VAD_FRAME_SAMPLES * 2  # int16
+VAD_AGGRESSIVENESS    = 2            # 0–3; 2 = balanced
+MIN_SPEECH_FRAMES     = 5            # At least 5 VAD frames (100ms) of speech
+SILENCE_END_FRAMES    = 15           # 15 consecutive silent frames (300ms) = end of utterance
+MAX_BUFFER_CHUNKS     = 80           # Hard cap: 8s of audio
 
 # ---------------------------------------------------------------------------
-# Voice Activity Detection (energy-based) — used by Whisper path only
-# Whisper hallucinates (".", "you", "Thank you") when given silence.
+# Fallback RMS VAD (if webrtcvad unavailable)
 # ---------------------------------------------------------------------------
-SILENCE_RMS_THRESHOLD = 50  # 0–32768 range; lower = more sensitive
-MIN_SPEECH_RATIO = 0.10     # At least 10% of chunks must be "loud"
+SILENCE_RMS_THRESHOLD = 50
+MIN_SPEECH_RATIO      = 0.10
+
+def _compute_rms(pcm_bytes: bytes) -> float:
+    if len(pcm_bytes) < 2:
+        return 0.0
+    num_samples = len(pcm_bytes) // 2
+    samples = struct.unpack_from(f"<{num_samples}h", pcm_bytes)
+    rms = math.sqrt(sum(s * s for s in samples) / num_samples)
+    return rms
 
 # ---------------------------------------------------------------------------
 # Whisper hallucination filter
 # ---------------------------------------------------------------------------
 _HALLUCINATIONS = {
-    # Empty / whitespace
     "", ".", "..", "...", "....", ".....", " ", "  ",
-    # Single filler words
     "you", "You", "the", "The", "a", "A",
     "uh", "um", "hmm", "hm", "ah", "oh", "Oh",
     "ok", "OK", "okay", "Okay",
     "bye", "Bye",
-    # Common Whisper silence hallucinations
     "thank you", "Thank you", "Thanks", "thanks",
     "Thank you.", "Thank you!",
     "you.", "you..", "you...",
@@ -58,23 +95,6 @@ _HALLUCINATIONS = {
     "www.mooji.org",
 }
 
-
-def _compute_rms(pcm_bytes: bytes) -> float:
-    if len(pcm_bytes) < 2:
-        return 0.0
-    num_samples = len(pcm_bytes) // 2
-    samples = struct.unpack_from(f"<{num_samples}h", pcm_bytes)
-    rms = math.sqrt(sum(s * s for s in samples) / num_samples)
-    return rms
-
-
-def _has_speech(chunks: list[bytes]) -> bool:
-    if not chunks:
-        return False
-    loud = sum(1 for c in chunks if _compute_rms(c) > SILENCE_RMS_THRESHOLD)
-    return (loud / len(chunks)) >= MIN_SPEECH_RATIO
-
-
 def _is_hallucination(text: str) -> bool:
     stripped = text.strip().strip(".,!?…")
     if stripped in _HALLUCINATIONS or text.strip() in _HALLUCINATIONS:
@@ -89,198 +109,160 @@ def _is_hallucination(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Deepgram streaming STT
+# Local Faster-Whisper transcription — in-memory, no disk I/O
 # ---------------------------------------------------------------------------
 
-async def _run_deepgram(audio_queue: asyncio.Queue, llm_queue: asyncio.Queue,
-                        signals, api_key: str):
-    """Live streaming STT via Deepgram Nova-2."""
-    try:
-        from deepgram import DeepgramClient, LiveTranscriptionEvents, LiveOptions
-    except ImportError:
-        print("stt_client: deepgram-sdk not installed. Run: pip install deepgram-sdk",
-              file=sys.stderr)
-        return
+async def _transcribe(chunks: list[bytes], model_size: str = "base.en") -> str | None:
+    """Transcribe audio chunks using local Faster-Whisper. No temp files."""
+    if WhisperModel is None:
+        print("stt_client: faster-whisper not available.", file=sys.stderr)
+        return None
 
-    dg = DeepgramClient(api_key)
-    connection = dg.listen.asyncwebsocket.v("1")
-
-    async def on_message(self, result, **kwargs):
-        try:
-            sentence = result.channel.alternatives[0].transcript.strip()
-            if not sentence:
-                return
-            is_final = result.is_final
-            if is_final:
-                print(f"stt_client [Deepgram]: {sentence!r}", file=sys.stderr)
-                signals.interim_transcript.emit(sentence)
-                signals.final_transcript.emit(sentence)
-                await llm_queue.put(sentence)
-            else:
-                signals.interim_transcript.emit(sentence)
-        except Exception as exc:
-            print(f"stt_client: Deepgram message error: {exc}", file=sys.stderr)
-
-    async def on_error(self, error, **kwargs):
-        print(f"stt_client: Deepgram error: {error}", file=sys.stderr)
-        signals.status_update.emit("disconnected")
-
-    connection.on(LiveTranscriptionEvents.Transcript, on_message)
-    connection.on(LiveTranscriptionEvents.Error, on_error)
-
-    options = LiveOptions(
-        model="nova-2",
-        language="en",
-        encoding="linear16",
-        sample_rate=16000,
-        channels=1,
-        interim_results=True,
-        utterance_end_ms=1000,
-        vad_events=True,
-    )
-
-    print("stt_client: Connecting to Deepgram...", file=sys.stderr)
-    started = await connection.start(options)
-    if not started:
-        print("stt_client: Deepgram connection failed.", file=sys.stderr)
-        signals.status_update.emit("disconnected")
-        return
-
-    print("stt_client: Deepgram connected.", file=sys.stderr)
-    signals.status_update.emit("connected")
-
-    try:
-        while True:
-            chunk = await audio_queue.get()
-            await connection.send(chunk)
-    except asyncio.CancelledError:
-        print("stt_client: Deepgram shutting down...", file=sys.stderr)
-        await connection.finish()
-        raise
-
-
-# ---------------------------------------------------------------------------
-# Whisper batch STT  —  end-of-utterance triggered
-# ---------------------------------------------------------------------------
-
-async def _transcribe(client: AsyncOpenAI, chunks: list[bytes]) -> str | None:
-    """Send audio chunks to Whisper and return cleaned transcript or None."""
     audio_data = b"".join(chunks)
-    fd, temp_path = tempfile.mkstemp(suffix=".wav")
+
+    # Write WAV to in-memory buffer — no disk I/O
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(audio_data)
+    buf.seek(0)
+
     try:
-        with os.fdopen(fd, "wb") as f:
-            with wave.open(f, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(16000)
-                wf.writeframes(audio_data)
-        with open(temp_path, "rb") as audio_file:
-            response = await client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                response_format="text",
-                language="en",
-            )
-        text = response.strip()
-        return None if _is_hallucination(text) else text
+        # Run blocking Faster-Whisper in thread pool to not block event loop
+        model = _get_whisper_model(model_size)
+        segments, info = await asyncio.to_thread(
+            model.transcribe,
+            buf,
+            language="en",
+            beam_size=5,
+            vad_filter=False,  # We handle VAD ourselves
+        )
+        text = " ".join(seg.text for seg in segments).strip()
+        if not text or _is_hallucination(text):
+            return None
+        return text
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        print(f"stt_client: Whisper error: {exc}", file=sys.stderr)
+        print(f"stt_client: Faster-Whisper error: {exc}", file=sys.stderr)
         return None
-    finally:
+
+
+# ---------------------------------------------------------------------------
+# WebRTC VAD helper — splits 64ms chunks into 20ms frames
+# ---------------------------------------------------------------------------
+
+def _is_speech_webrtc(vad_instance, chunk: bytes) -> bool:
+    """Check if a 64ms chunk contains speech by splitting into 20ms frames."""
+    speech_frames = 0
+    total_frames = 0
+    offset = 0
+    while offset + VAD_FRAME_BYTES <= len(chunk):
+        frame = chunk[offset:offset + VAD_FRAME_BYTES]
         try:
-            os.unlink(temp_path)
-        except OSError:
+            if vad_instance.is_speech(frame, 16000):
+                speech_frames += 1
+        except Exception:
             pass
+        total_frames += 1
+        offset += VAD_FRAME_BYTES
+    if total_frames == 0:
+        return False
+    return (speech_frames / total_frames) >= 0.5
 
 
-async def _run_whisper(audio_queue: asyncio.Queue, llm_queue: asyncio.Queue,
-                       signals, api_key: str):
+# ---------------------------------------------------------------------------
+# Main STT loop — Faster-Whisper with WebRTC VAD
+# ---------------------------------------------------------------------------
+
+async def run_stt(audio_queue: asyncio.Queue, llm_queue: asyncio.Queue,
+                  signals, openai_api_key: str = ""):
     """
-    End-of-utterance triggered Whisper STT.
-
-    State machine:
-      SILENCE  →  (speech chunk detected)  →  SPEAKING
-      SPEAKING →  (silence for 0.5s)        →  TRIGGER Whisper → SILENCE
-      SPEAKING →  (buffer hits hard cap)    →  TRIGGER Whisper → SILENCE
+    Local STT pipeline:
+      Audio Queue → WebRTC VAD → Utterance Buffer
+        → 300ms silence → Faster-Whisper → Hallucination filter → LLM Queue
     """
-    client = AsyncOpenAI(api_key=api_key)
-    print("stt_client: Whisper STT initialised (end-of-utterance mode).", file=sys.stderr)
+    cfg = _config.load_config()
+    model_size = cfg.get("WHISPER_MODEL", "base.en")
+
+    # Pre-load the model so first transcription has no delay
+    if WhisperModel is not None:
+        await asyncio.to_thread(_get_whisper_model, model_size)
+    else:
+        print("stt_client: faster-whisper unavailable — STT disabled.", file=sys.stderr)
+        signals.status_update.emit("disconnected")
+        return
+
+    # Set up VAD
+    if _vad_available:
+        vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
+        print(f"stt_client: WebRTC VAD active (aggressiveness={VAD_AGGRESSIVENESS}).", file=sys.stderr)
+    else:
+        vad = None
+        print("stt_client: Using RMS fallback VAD.", file=sys.stderr)
+
     signals.status_update.emit("connected")
+    print(f"stt_client: Ready — model='{model_size}', VAD={'webrtcvad' if vad else 'rms'}.", file=sys.stderr)
 
-    utterance_buf: list[bytes] = []   # chunks for the current utterance
-    silence_count = 0                 # consecutive silent chunks since last speech
+    utterance_buf: list[bytes] = []
+    silence_count = 0
+    speech_frame_count = 0
     speaking = False
 
     async def _flush(buf: list[bytes]):
-        """Send buffer to Whisper and forward result."""
+        """Send buffer to Faster-Whisper and forward result to LLM queue."""
         if not buf:
             return
-        transcript = await _transcribe(client, buf)
+        transcript = await _transcribe(buf, model_size)
         if transcript:
             print(f"stt_client [Whisper]: {transcript!r}", file=sys.stderr)
             signals.interim_transcript.emit(transcript)
             signals.final_transcript.emit(transcript)
-            await llm_queue.put(transcript)
+            try:
+                llm_queue.put_nowait(transcript)
+            except asyncio.QueueFull:
+                pass
 
     try:
         while True:
             chunk = await audio_queue.get()
-            is_loud = _compute_rms(chunk) > SILENCE_RMS_THRESHOLD
+
+            # Determine if this chunk has speech
+            if vad is not None:
+                is_loud = _is_speech_webrtc(vad, chunk)
+            else:
+                is_loud = _compute_rms(chunk) > SILENCE_RMS_THRESHOLD
 
             if is_loud:
-                # Active speech
                 utterance_buf.append(chunk)
                 silence_count = 0
+                speech_frame_count += 1
                 speaking = True
             else:
-                # Silence chunk
                 if speaking:
-                    utterance_buf.append(chunk)   # include trailing silence for context
+                    utterance_buf.append(chunk)  # keep trailing silence for context
                     silence_count += 1
-                    if silence_count >= SILENCE_END_CHUNKS:
-                        # Person stopped talking → fire immediately
+                    if silence_count >= SILENCE_END_FRAMES and speech_frame_count >= MIN_SPEECH_FRAMES:
                         buf_copy = utterance_buf[:]
                         utterance_buf = []
                         silence_count = 0
+                        speech_frame_count = 0
                         speaking = False
                         asyncio.create_task(_flush(buf_copy))
 
-            # Hard cap: send if buffer gets very long (e.g., long continuous speech)
+            # Hard cap: flush if buffer is getting too long
             if len(utterance_buf) >= MAX_BUFFER_CHUNKS:
                 buf_copy = utterance_buf[:]
                 utterance_buf = []
                 silence_count = 0
+                speech_frame_count = 0
                 speaking = False
                 asyncio.create_task(_flush(buf_copy))
 
     except asyncio.CancelledError:
-        # Flush any remaining speech on shutdown
         if utterance_buf and speaking:
             await _flush(utterance_buf)
-        print("stt_client: Whisper shutting down...", file=sys.stderr)
+        print("stt_client: shutting down.", file=sys.stderr)
         raise
-
-
-# ---------------------------------------------------------------------------
-# Public entry point — dispatches to Deepgram or Whisper based on config
-# ---------------------------------------------------------------------------
-
-async def run_stt(audio_queue: asyncio.Queue, llm_queue: asyncio.Queue,
-                  signals, openai_api_key: str):
-    cfg = _config.load_config()
-    provider = cfg.get("STT_PROVIDER", "whisper").lower()
-    deepgram_key = cfg.get("DEEPGRAM_API_KEY", "")
-
-    if provider == "deepgram" and deepgram_key:
-        print("stt_client: Using Deepgram Nova-2 (streaming).", file=sys.stderr)
-        await _run_deepgram(audio_queue, llm_queue, signals, deepgram_key)
-    else:
-        if provider == "deepgram" and not deepgram_key:
-            print("stt_client: Deepgram key missing — falling back to Whisper.",
-                  file=sys.stderr)
-        if not openai_api_key:
-            print("stt_client: OPENAI_API_KEY missing. STT disabled.", file=sys.stderr)
-            return
-        await _run_whisper(audio_queue, llm_queue, signals, openai_api_key)
