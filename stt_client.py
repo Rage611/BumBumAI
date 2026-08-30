@@ -1,10 +1,22 @@
 import asyncio
 import sys
+import os
 import io
 import wave
 import struct
 import math
 from collections import deque
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Add NVIDIA CUDA DLL directories to PATH (pip-installed wheels)
+# ---------------------------------------------------------------------------
+_venv_nvidia = Path(sys.prefix) / "Lib" / "site-packages" / "nvidia"
+if _venv_nvidia.is_dir():
+    for _dll_dir in _venv_nvidia.rglob("bin"):
+        if _dll_dir.is_dir():
+            os.add_dll_directory(str(_dll_dir))
+            os.environ["PATH"] = str(_dll_dir) + os.pathsep + os.environ.get("PATH", "")
 
 # ---------------------------------------------------------------------------
 # Faster-Whisper (local, free) — loaded once at startup
@@ -16,9 +28,15 @@ try:
     def _get_whisper_model(model_size: str = "base.en") -> WhisperModel:
         global _whisper_model
         if _whisper_model is None:
-            print(f"stt_client: Loading Faster-Whisper model '{model_size}'...", file=sys.stderr)
-            _whisper_model = WhisperModel(model_size, device="cpu", compute_type="int8")
-            print("stt_client: Faster-Whisper model loaded.", file=sys.stderr)
+            # Try GPU first, fall back to CPU
+            try:
+                print(f"stt_client: Loading Faster-Whisper model '{model_size}' on GPU (CUDA)...", file=sys.stderr)
+                _whisper_model = WhisperModel(model_size, device="cuda", compute_type="float16")
+                print("stt_client: Faster-Whisper model loaded on GPU.", file=sys.stderr)
+            except Exception as gpu_exc:
+                print(f"stt_client: GPU failed ({gpu_exc}), falling back to CPU...", file=sys.stderr)
+                _whisper_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+                print("stt_client: Faster-Whisper model loaded on CPU.", file=sys.stderr)
         return _whisper_model
 
 except ImportError:
