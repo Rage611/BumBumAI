@@ -23,7 +23,7 @@ RULES:
    - NO markdown bolding (**). Plain text only.
 5. HINGLISH: If the interviewer speaks in Hindi/Hinglish, understand the intent and reply in simple English.
 6. DSA / CODING: Whenever a DSA or algorithm problem is mentioned (even if the interviewer says "what's your approach" or "how would you solve this"), ALWAYS output BOTH in this exact order:
-   - FIRST: The full C++ code solution. Write it like a beginner — simple for-loops, basic if-else, simple arrays and vectors. No complex STL, no auto, no lambda, no fancy one-liners. Keep variable names simple (i, j, n, arr, ans). Zero comments.
+   - FIRST: The full code solution. If the interviewer says "in Python" or "in Java" or any specific language, use THAT language. If no language is mentioned, default to C++. Write it like a beginner — simple for-loops, basic if-else, simple arrays/lists. No complex tricks, no fancy one-liners. Keep variable names simple (i, j, n, arr, ans). Zero comments.
    - THEN: Below the code, write a short spoken-style approach explanation (3-5 sentences) that I can say out loud. Use extremely simple words. Put a double line break after every sentence.
    - NEVER skip the code. NEVER give only the approach without code. ALWAYS give both.
 7. NEVER ASK QUESTIONS BACK: You must NEVER ask the interviewer for clarification, more details, or the full problem statement. NEVER say things like "Could you tell me more?", "What exactly do they want?", "Let me know the details". You are a teleprompter — you ONLY output answers. If the question is incomplete or unclear, just answer with whatever information you have. Make reasonable assumptions and give the best possible answer immediately.
@@ -36,7 +36,7 @@ VISION_PROMPT = (
     "You are a stealth interview assistant analyzing a screenshot and the interviewer's verbal question.\n\n"
     "Look at the screenshot and the interviewer's verbal context. Based on what they are asking, provide the EXACT response I should say out loud or type.\n\n"
     "CRITICAL RULES FOR DSA / CODING:\n"
-    "- If the interviewer asks for the CODE or SOLUTION, output C++ that a beginner would write. Simple for-loops, basic if-else, simple arrays and vectors. No complex STL, no auto, no lambda, no fancy one-liners. No comments. Then below the code, write a short 3-5 sentence spoken approach explanation.\n"
+    "- If the interviewer asks for the CODE or SOLUTION, write code in whatever language they specify (Python, Java, etc). If no language is mentioned, default to C++. Write it like a beginner — simple loops, basic if-else. No complex tricks. No comments. Then below the code, write a short 3-5 sentence spoken approach explanation.\n"
     "- If the interviewer ONLY asks 'Walk me through your approach', 'How would you solve this', or 'Explain the logic', output ONLY a spoken-style step-by-step approach in 3-6 sentences using EXTREMELY SIMPLE WORDS. Do NOT output code in this case.\n\n"
     "CRITICAL RULES FOR GENERAL QUESTIONS:\n"
     "- Output a confident, spoken-style explanation using EXTREMELY SIMPLE, BASIC ENGLISH.\n"
@@ -244,7 +244,7 @@ async def _generate(transcript: str, signals) -> None:
                     "model": model,
                     "messages": messages,
                     "stream": True,
-                    "max_tokens": 350,
+                    "max_tokens": 1024,
                     "temperature": 0.3,
                     "top_p": 0.9,
                 }
@@ -397,7 +397,7 @@ async def run_llm(llm_queue: asyncio.Queue, signals) -> None:
     print(f"llm_client: ProviderChain ready — {len(_chain._providers)} slot(s). Primary: {_chain.label}.", file=sys.stderr)
 
     # Debounce state
-    DEBOUNCE_SECONDS = 1.5
+    DEBOUNCE_SECONDS = 2.5
     accumulated: list[str] = []
     debounce_task: asyncio.Task | None = None
 
