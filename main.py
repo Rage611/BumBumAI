@@ -2,6 +2,13 @@ import sys
 import asyncio
 import threading
 import os
+import ctypes
+
+# Hide the console window immediately — keeps debug logs invisible on screen share
+try:
+    ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
+except Exception:
+    pass
 
 from PyQt6.QtWidgets import QApplication
 

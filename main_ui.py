@@ -254,13 +254,26 @@ class SettingsDialog(QDialog):
                 p, m = entry[0], entry[1]
             combo.setCurrentIndex(self._model_index(p, m))
 
+    def _safe_msgbox(self, kind, title, text):
+        """Show a QMessageBox that's hidden from screen capture."""
+        if kind == "warning":
+            box = QMessageBox(QMessageBox.Icon.Warning, title, text, QMessageBox.StandardButton.Ok, self)
+        else:
+            box = QMessageBox(QMessageBox.Icon.Information, title, text, QMessageBox.StandardButton.Ok, self)
+        try:
+            hwnd = ctypes.c_void_p(int(box.winId()))
+            ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x00000011)
+        except Exception:
+            pass
+        box.exec()
+
     def save_settings(self):
         groq_keys = [inp.text().strip() for inp in self.groq_inputs]
         google_keys = [inp.text().strip() for inp in self.google_inputs]
         cerebras_keys = [inp.text().strip() for inp in self.cerebras_inputs]
 
         if not any(google_keys) and not any(groq_keys):
-            QMessageBox.warning(self, "Missing Key", "At least one Google or Groq API key is required.")
+            self._safe_msgbox("warning", "Missing Key", "At least one Google or Groq API key is required.")
             return
 
         # Build chain from dropdowns
@@ -273,7 +286,7 @@ class SettingsDialog(QDialog):
                 continue
             key = (provider, model_id)
             if key in seen:
-                QMessageBox.warning(self, "Duplicate", f"Each model can only appear once.")
+                self._safe_msgbox("warning", "Duplicate", "Each model can only appear once.")
                 return
             seen.add(key)
             chain.append({"provider": provider, "model": model_id})
@@ -298,7 +311,7 @@ class SettingsDialog(QDialog):
         llm_client.configure_vision(google_keys)
         self.status_label.setText(self._model_label())
 
-        QMessageBox.information(self, "Saved", "Settings saved and applied!\nKeys and Provider Chain are now active.")
+        self._safe_msgbox("info", "Saved", "Settings saved and applied!\nKeys and Provider Chain are now active.")
         self.accept()
 
 
@@ -309,7 +322,7 @@ class MainWindow(QMainWindow):
     def __init__(self, loop=None):
         super().__init__()
         self._loop = loop
-        self.setWindowTitle("Interview Assistant")
+        self.setWindowTitle("Notes")
         self.setMinimumSize(380, 500)
         self.resize(450, 800)
         self.setMaximumWidth(450)
@@ -716,11 +729,11 @@ class MainWindow(QMainWindow):
         self.is_paused = not self.is_paused
         if self.is_paused:
             pause_event.clear()
-            self.setWindowTitle("Interview Assistant  ⏸ [PAUSED]")
+            self.setWindowTitle("Notes  ⏸")
             self.dot_indicator.setStyleSheet("background-color: #FF8800; border-radius: 4px;")
         else:
             pause_event.set()
-            self.setWindowTitle("Interview Assistant")
+            self.setWindowTitle("Notes")
             self.dot_indicator.setStyleSheet("background-color: #00FF88; border-radius: 4px;")
 
     def _on_clear_ui(self):
