@@ -23,10 +23,21 @@ RULES:
    - NO markdown bolding (**). Plain text only.
 5. HINGLISH: If the interviewer speaks in Hindi/Hinglish, understand the intent and reply in simple English.
 6. DSA / CODING: Whenever a DSA or algorithm problem is mentioned (even if the interviewer says "what's your approach" or "how would you solve this"), ALWAYS output BOTH in this exact order:
-   - FIRST: The full code solution. If the interviewer says "in Python" or "in Java" or any specific language, use THAT language. If no language is mentioned, default to C++. Write it like a beginner — simple for-loops, basic if-else, simple arrays/lists. No complex tricks, no fancy one-liners. Keep variable names simple (i, j, n, arr, ans). Zero comments.
+   - FIRST: The full code solution. If the interviewer says "in Python" or "in Java" or any specific language, use THAT language. If no language is mentioned, default to C++.
+     BEGINNER STYLE RULES — follow these strictly:
+     - Use plain int arrays or vector<int>, NOT const references, NOT & parameters, NOT auto
+     - Use simple index-based for loops: for(int i = 0; i < n; i++)
+     - Do NOT use: const, &, auto, push_back, emplace_back, .size() cast tricks, iterators, range-based for, lambda, ternary operator
+     - Variable names: i, j, n, arr, ans, left, right, temp — nothing fancy
+     - Zero comments inside code
+     BAD example (do NOT write like this):
+       vector<int> reverseList(const vector<int>& arr) { vector<int> rev; for(auto x : arr) rev.push_back(x); }
+     GOOD example (write like this):
+       vector<int> reverseList(vector<int> arr) { int n = arr.size(); vector<int> rev(n); for(int i = 0; i < n; i++) rev[i] = arr[n-1-i]; return rev; }
    - THEN: Below the code, write a short spoken-style approach explanation (3-5 sentences) that I can say out loud. Use extremely simple words. Put a double line break after every sentence.
-   - NEVER skip the code. NEVER give only the approach without code. ALWAYS give both.
+   - NEVER skip the code. NEVER give only the approach without code. ALWAYS give both. The word "approach" in the question is NOT a reason to skip the code.
 7. NEVER ASK QUESTIONS BACK: You must NEVER ask the interviewer for clarification, more details, or the full problem statement. NEVER say things like "Could you tell me more?", "What exactly do they want?", "Let me know the details". You are a teleprompter — you ONLY output answers. If the question is incomplete or unclear, just answer with whatever information you have. Make reasonable assumptions and give the best possible answer immediately.
+8. NEVER GIVE META-RESPONSES: NEVER say things like "Got it", "Understood", "I'm ready", "I'm here to help", "Sure thing", "Of course", or any acknowledgment. If the input doesn't contain a clear question, output NOTHING. Stay completely silent until there is an actual question to answer.
 """
 
 # ---------------------------------------------------------------------------
@@ -179,12 +190,14 @@ def _build_chain() -> ProviderChain:
 _history: deque = deque(maxlen=30)
 _chain: ProviderChain | None = None
 _current_task: asyncio.Task | None = None
+_is_generating: bool = False  # True while LLM is actively streaming a response
+_pending_buffer: list[str] = []  # holds fragments that arrived during generation
 
 
 
 async def _generate(transcript: str, signals) -> None:
     """Generate a response, rotating through keys then models on quota errors."""
-    global _chain
+    global _chain, _is_generating
     if _chain is None or _chain.empty:
         signals.llm_token.emit("\n\n🚨 No LLM providers available. 🚨\n\n")
         signals.llm_end.emit()
@@ -195,7 +208,8 @@ async def _generate(transcript: str, signals) -> None:
         _history.popleft()
 
     signals.llm_start.emit()
-    
+    _is_generating = True
+
     # Consolidate history to prevent strict-API errors (e.g. consecutive 'user' roles)
     consolidated_history = []
     for msg in _history:
@@ -209,7 +223,7 @@ async def _generate(transcript: str, signals) -> None:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + consolidated_history
     else:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + consolidated_history + [{"role": "user", "content": transcript}]
-        
+
     full_response = ""
 
     while True:
@@ -269,12 +283,29 @@ async def _generate(transcript: str, signals) -> None:
 
             _history.append({"role": "user", "content": transcript})
             _history.append({"role": "assistant", "content": full_response})
+            _is_generating = False
             signals.llm_end.emit()
+
+            # Don't fire buffer instantly — wait 1.5s for more fragments to accumulate
+            global _pending_buffer
+            if _pending_buffer:
+                async def _fire_pending():
+                    global _pending_buffer
+                    await asyncio.sleep(1.5)
+                    if _pending_buffer:
+                        pending_text = " ".join(_pending_buffer).strip()
+                        _pending_buffer.clear()
+                        if len(pending_text.split()) >= 4:
+                            print(f"llm_client: firing buffered content: '{pending_text[:60]}'", file=sys.stderr)
+                            await _generate(pending_text, signals)
+                asyncio.create_task(_fire_pending())
+
             return  # success
 
         except asyncio.CancelledError:
-            if transcript.strip():
+            if full_response.strip():
                 _history.append({"role": "user", "content": transcript})
+            _is_generating = False
             signals.llm_end.emit()
             raise
 
@@ -287,11 +318,13 @@ async def _generate(transcript: str, signals) -> None:
                     continue
                 else:
                     signals.llm_token.emit("\n\n🚨 All providers exhausted. 🚨\n\n")
+                    _is_generating = False
                     signals.llm_end.emit()
                     return
             else:
                 print(f"llm_client: error on {label}: {exc}", file=sys.stderr)
                 signals.llm_token.emit(f"\n\n🚨 Error ({label}): {exc} 🚨\n\n")
+                _is_generating = False
                 signals.llm_end.emit()
                 return
 
@@ -397,22 +430,49 @@ async def run_llm(llm_queue: asyncio.Queue, signals) -> None:
     print(f"llm_client: ProviderChain ready — {len(_chain._providers)} slot(s). Primary: {_chain.label}.", file=sys.stderr)
 
     # Debounce state
-    DEBOUNCE_SECONDS = 2.5
+    DEBOUNCE_FAST = 1.0   # concept questions — fire quickly
+    DEBOUNCE_SLOW = 3.0   # DSA coding questions — wait for full problem
     accumulated: list[str] = []
     debounce_task: asyncio.Task | None = None
+
+    _DSA_KEYWORDS = {
+        "array", "linked", "list", "tree", "binary", "graph", "node",
+        "matrix", "string", "stack", "queue", "hash", "map", "set",
+        "sort", "search", "traverse", "reverse", "rotate", "merge",
+        "swap", "subset", "subsequence", "palindrome", "permutation",
+        "given", "determine", "function", "integers", "elements",
+        "index", "position", "length", "sum", "target", "maximum",
+        "minimum", "path", "depth", "height", "diameter", "level",
+        "jump", "reach", "sliding", "window", "pointer", "two pointer",
+    }
+
+    _TRIGGER_WORDS = {
+        "explain", "what", "how", "why", "define", "compare",
+        "implement", "design", "write", "describe", "tell",
+        "difference", "find", "solve", "reverse", "sort",
+        "traverse", "search", "print", "return", "build",
+    }
 
     async def _fire_after_silence():
         """Wait for silence, then combine accumulated fragments and fire LLM."""
         nonlocal accumulated, debounce_task
-        await asyncio.sleep(DEBOUNCE_SECONDS)
+
+        # Peek at accumulated text to decide debounce length
+        peek = " ".join(accumulated).lower().split()
+        is_dsa = any(w in _DSA_KEYWORDS for w in peek)
+        wait_time = DEBOUNCE_SLOW if is_dsa else DEBOUNCE_FAST
+
+        await asyncio.sleep(wait_time)
         if not accumulated:
             return
         combined = " ".join(accumulated).strip()
         accumulated = []
         debounce_task = None
 
-        if len(combined.split()) < 4:
-            return  # too short, ignore
+        words = combined.lower().split()
+        has_trigger = any(w in _TRIGGER_WORDS for w in words)
+        if len(words) < 4 and not has_trigger:
+            return  # too short and no question trigger word — ignore
 
         # Cancel any previous generation
         global _current_task
@@ -423,6 +483,14 @@ async def run_llm(llm_queue: asyncio.Queue, signals) -> None:
             except asyncio.CancelledError:
                 pass
 
+        # If generating, buffer for later instead of dropping
+        if _is_generating:
+            global _pending_buffer
+            _pending_buffer.append(combined)
+            print(f"llm_client: buffered during generation: '{combined[:50]}'", file=sys.stderr)
+            return
+
+        print(f"llm_client: firing ({'DSA' if is_dsa else 'concept'}, {wait_time}s debounce): '{combined[:60]}'", file=sys.stderr)
         _current_task = asyncio.create_task(_generate(combined, signals))
 
     try:
