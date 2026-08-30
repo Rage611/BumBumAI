@@ -1,13 +1,25 @@
 import asyncio
 import sys
 from collections import deque
+from pathlib import Path
 
 
 from groq import AsyncGroq
 import config as _config
 
 # ---------------------------------------------------------------------------
-# System prompt — lean, output-focused, no resume
+# Load resume/project context (compact — appended to system prompt)
+# ---------------------------------------------------------------------------
+_RESUME_PATH = Path(__file__).parent / "resume.md"
+_resume_context = ""
+try:
+    _resume_context = "\n\n--- MY PROJECT CONTEXT ---\n" + _RESUME_PATH.read_text(encoding="utf-8")
+    print(f"llm_client: loaded resume.md ({len(_resume_context)} chars)", file=sys.stderr)
+except Exception:
+    print("llm_client: resume.md not found — running without project context.", file=sys.stderr)
+
+# ---------------------------------------------------------------------------
+# System prompt — lean, output-focused + project context
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT = """You are my real-time interview assistant. You hear what the interviewer asks and you give me the EXACT words I should say out loud.
 
@@ -39,6 +51,8 @@ RULES:
 7. NEVER ASK QUESTIONS BACK: You must NEVER ask the interviewer for clarification, more details, or the full problem statement. NEVER say things like "Could you tell me more?", "What exactly do they want?", "Let me know the details". You are a teleprompter — you ONLY output answers. If the question is incomplete or unclear, just answer with whatever information you have. Make reasonable assumptions and give the best possible answer immediately.
 8. NEVER GIVE META-RESPONSES: NEVER say things like "Got it", "Understood", "I'm ready", "I'm here to help", "Sure thing", "Of course", or any acknowledgment. If the input doesn't contain a clear question, output NOTHING. Stay completely silent until there is an actual question to answer.
 """
+
+SYSTEM_PROMPT += _resume_context
 
 # ---------------------------------------------------------------------------
 # Vision prompt (used by Gemini)
