@@ -35,7 +35,9 @@ class HotkeySignals(QObject):
     clear_ui = pyqtSignal()
     open_settings = pyqtSignal()
     toggle_vision = pyqtSignal()
-
+    switch_model_1 = pyqtSignal()
+    switch_model_2 = pyqtSignal()
+    switch_model_3 = pyqtSignal()
 
 hotkey_signals = HotkeySignals()
 pause_event = threading.Event()
@@ -43,13 +45,15 @@ pause_event.set()
 
 MODEL_OPTIONS = [
     ("— None (skip this slot) —",    None,    None),
-    ("GPT OSS 120B  (Groq)",        "groq",  "openai/gpt-oss-120b"),
-    ("GPT OSS 20B — Fast  (Groq)",  "groq",  "openai/gpt-oss-20b"),
+    ("Groq GPT-OSS 120B (Fastest)",  "groq",     "openai/gpt-oss-120b"),
+    ("Gemini 3.6 Flash (Google)",    "google",   "gemini-3.6-flash"),
+    ("Gemini 3.1 Flash Lite",        "google",   "gemini-3.1-flash-lite"),
+    ("Cerebras GPT-OSS 120B",        "cerebras", "gpt-oss-120b"),
 ]
 
 DEFAULT_CHAIN = [
-    {"provider": "groq", "model": "openai/gpt-oss-120b"},
-    {"provider": "groq", "model": "openai/gpt-oss-20b"},
+    {"provider": "groq",   "model": "openai/gpt-oss-120b"},
+    {"provider": "google", "model": "gemini-3.6-flash"},
 ]
 
 MAX_KEYS = 5  # Max API keys per provider
@@ -121,7 +125,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(groq_box)
 
         # --- Google AI Studio Keys ---
-        google_label = QLabel("Google AI Studio Keys  (for Vision — Gemini 3.5 Flash, free)")
+        google_label = QLabel("Google AI Studio Keys  (Primary for Vision & Text)")
         google_label.setObjectName("section_label")
         layout.addWidget(google_label)
 
@@ -135,12 +139,34 @@ class SettingsDialog(QDialog):
             lbl.setFixedWidth(50)
             inp = QLineEdit()
             inp.setEchoMode(QLineEdit.EchoMode.Password)
-            inp.setPlaceholderText(f"AIza... (slot {i+1})")
+            inp.setPlaceholderText(f"AIza... / AQ... (slot {i+1})")
             self.google_inputs.append(inp)
             row.addWidget(lbl)
             row.addWidget(inp)
             google_inner.addLayout(row)
         layout.addWidget(google_box)
+
+        # --- Cerebras Keys ---
+        cerebras_label = QLabel("Cerebras API Keys  (Emergency Llama 3.3 70B)")
+        cerebras_label.setObjectName("section_label")
+        layout.addWidget(cerebras_label)
+
+        self.cerebras_inputs: list[QLineEdit] = []
+        cerebras_box = QGroupBox("Max 3 keys")
+        cerebras_inner = QVBoxLayout(cerebras_box)
+        cerebras_inner.setSpacing(4)
+        for i in range(3):
+            row = QHBoxLayout()
+            lbl = QLabel(f"Key {i+1}:")
+            lbl.setFixedWidth(50)
+            inp = QLineEdit()
+            inp.setEchoMode(QLineEdit.EchoMode.Password)
+            inp.setPlaceholderText(f"csk-... (slot {i+1})")
+            self.cerebras_inputs.append(inp)
+            row.addWidget(lbl)
+            row.addWidget(inp)
+            cerebras_inner.addLayout(row)
+        layout.addWidget(cerebras_box)
 
         # --- Whisper Model ---
         model_label = QLabel("Local Whisper Model")
@@ -158,7 +184,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(chain_label)
 
         self.priority_combos: list[QComboBox] = []
-        ranks = ["1st Preference", "2nd Preference"]
+        ranks = ["1st Preference", "2nd Preference", "3rd Preference"]
         for rank in ranks:
             row_widget = QWidget()
             row = QHBoxLayout(row_widget)
@@ -205,6 +231,10 @@ class SettingsDialog(QDialog):
         for i, inp in enumerate(self.google_inputs):
             inp.setText(google_keys[i] if i < len(google_keys) else "")
 
+        cerebras_keys = cfg.get("CEREBRAS_API_KEYS", [""] * 3)
+        for i, inp in enumerate(self.cerebras_inputs):
+            inp.setText(cerebras_keys[i] if i < len(cerebras_keys) else "")
+
         whisper = cfg.get("WHISPER_MODEL", "base.en")
         self.whisper_combo.setCurrentIndex(1 if "small" in whisper else 0)
 
@@ -221,9 +251,10 @@ class SettingsDialog(QDialog):
     def save_settings(self):
         groq_keys = [inp.text().strip() for inp in self.groq_inputs]
         google_keys = [inp.text().strip() for inp in self.google_inputs]
+        cerebras_keys = [inp.text().strip() for inp in self.cerebras_inputs]
 
-        if not any(groq_keys):
-            QMessageBox.warning(self, "Missing Key", "At least one Groq API key is required.")
+        if not any(google_keys) and not any(groq_keys):
+            QMessageBox.warning(self, "Missing Key", "At least one Google or Groq API key is required.")
             return
 
         # Build chain from dropdowns
@@ -249,16 +280,19 @@ class SettingsDialog(QDialog):
         cfg = config.load_config()
         cfg["GROQ_API_KEYS"]   = groq_keys
         cfg["GOOGLE_API_KEYS"] = google_keys
+        cfg["CEREBRAS_API_KEYS"] = cerebras_keys
         cfg["WHISPER_MODEL"]   = whisper_model
         cfg["LLM_CHAIN"]       = chain
         cfg["LLM_MODEL"]       = chain[0]["model"]
         cfg["LLM_PROVIDER"]    = chain[0]["provider"]
         config.save_config(cfg)
-
-        # Apply new keys immediately without restart
+        
+        # Tell llm_client to rebuild chain
+        llm_client.rebuild_chain()
         llm_client.configure_vision(google_keys)
+        self.status_label.setText(self._model_label())
 
-        QMessageBox.information(self, "Saved", "Settings saved and applied!\nGroq key rotation and vision keys are now active.")
+        QMessageBox.information(self, "Saved", "Settings saved and applied!\nKeys and Provider Chain are now active.")
         self.accept()
 
 
@@ -301,6 +335,9 @@ class MainWindow(QMainWindow):
         hotkey_signals.clear_ui.connect(self._on_clear_ui)
         hotkey_signals.open_settings.connect(self.show_settings)
         hotkey_signals.toggle_vision.connect(self.toggle_vision_mode)
+        hotkey_signals.switch_model_1.connect(lambda: self._switch_provider("google"))
+        hotkey_signals.switch_model_2.connect(lambda: self._switch_provider("groq"))
+        hotkey_signals.switch_model_3.connect(lambda: self._switch_provider("cerebras"))
         self._vision_capture = VisionCapture(parent=self)
         self._vision_capture.image_captured.connect(self.handle_new_image)
         self._apply_capture_exclusion()
@@ -577,6 +614,36 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self)
         dlg.exec()
         # No restart needed — settings applied immediately in save_settings()
+        self.status_label.setText(self._model_label())
+
+    def _switch_provider(self, target_provider: str):
+        cfg = config.load_config()
+        chain = cfg.get("LLM_CHAIN", DEFAULT_CHAIN)
+        
+        # Find if target provider is in the chain
+        target_idx = -1
+        for i, c in enumerate(chain):
+            if c.get("provider") == target_provider:
+                target_idx = i
+                break
+                
+        if target_idx != -1:
+            # Swap it to the front
+            item = chain.pop(target_idx)
+            chain.insert(0, item)
+            cfg["LLM_CHAIN"] = chain
+            cfg["LLM_MODEL"] = item.get("model")
+            config.save_config(cfg)
+            
+            # Tell llm_client to rebuild chain
+            llm_client.rebuild_chain()
+            
+            self.status_label.setText(self._model_label())
+            
+            provider_name = target_provider.upper()
+            self._final_sentences.append(f"\n[System: Force switched to {provider_name}]\n")
+            self.ai_edit.setText("".join(self._final_sentences))
+            self.ai_edit.verticalScrollBar().setValue(self.ai_edit.verticalScrollBar().maximum())
 
     def toggle_vision_mode(self):
         self.vision_active = not self.vision_active
@@ -612,11 +679,14 @@ class MainWindow(QMainWindow):
     def _model_label() -> str:
         try:
             cfg = config.load_config()
-            model = cfg.get("LLM_MODEL", "llama-3.3-70b-versatile")
-            provider = cfg.get("LLM_PROVIDER", "groq").upper()
-            return f"{provider} · {model}"
+            chain = cfg.get("LLM_CHAIN", [])
+            if chain and len(chain) > 0:
+                provider = chain[0].get("provider", "groq").upper()
+                model = chain[0].get("model", "unknown")
+                return f"{provider} · {model}"
+            return "GOOGLE · gemini-3.6-flash"
         except Exception:
-            return "GROQ · Llama 3.3 70B"
+            return "GOOGLE · gemini-3.6-flash"
 
     def handle_new_image(self, base64_image: str):
         audio_ctx = " ".join(self._final_sentences[-2:]) if self._final_sentences else ""

@@ -32,7 +32,7 @@ def _env_device_index(name):
         return None
 
 
-async def _main_pipeline(groq_keys: list[str]):
+async def _main_pipeline():
     audio_queue = asyncio.Queue(maxsize=200)
     llm_queue = asyncio.Queue(maxsize=10)
     system_device_index = _env_device_index("SYSTEM_DEVICE_INDEX")
@@ -40,7 +40,7 @@ async def _main_pipeline(groq_keys: list[str]):
         await asyncio.gather(
             audio_capture.run_capture(audio_queue, loop, None, system_device_index),
             stt_client.run_stt(audio_queue, llm_queue, signals),
-            llm_client.run_llm(llm_queue, signals, groq_keys),
+            llm_client.run_llm(llm_queue, signals),
         )
     except asyncio.CancelledError:
         raise
@@ -77,8 +77,8 @@ if __name__ == "__main__":
             groq_keys = keys.get("GROQ_API_KEYS", [])
             google_keys = keys.get("GOOGLE_API_KEYS", [])
 
-    if not any(k.strip() for k in groq_keys):
-        print("ERROR: At least one Groq API key is required to run Parakeet.", file=sys.stderr)
+    if not any(k.strip() for k in groq_keys) and not any(k.strip() for k in google_keys):
+        print("ERROR: At least one Google or Groq API key is required to run Parakeet.", file=sys.stderr)
         sys.exit(1)
 
     # List audio devices for debugging
@@ -99,7 +99,7 @@ if __name__ == "__main__":
     )
     async_thread.start()
 
-    asyncio.run_coroutine_threadsafe(_main_pipeline(groq_keys), loop)
+    asyncio.run_coroutine_threadsafe(_main_pipeline(), loop)
 
     if keyboard is None:
         print("main: keyboard module not installed; global hotkeys disabled.", file=sys.stderr)
@@ -109,6 +109,9 @@ if __name__ == "__main__":
             keyboard.add_hotkey("f8", lambda: hotkey_signals.open_settings.emit(), suppress=True)
             keyboard.add_hotkey("f9", lambda: hotkey_signals.toggle_pause.emit(), suppress=True)
             keyboard.add_hotkey("f10", lambda: hotkey_signals.clear_ui.emit(), suppress=True)
+            keyboard.add_hotkey("alt+1", lambda: hotkey_signals.switch_model_1.emit(), suppress=True)
+            keyboard.add_hotkey("alt+2", lambda: hotkey_signals.switch_model_2.emit(), suppress=True)
+            keyboard.add_hotkey("alt+3", lambda: hotkey_signals.switch_model_3.emit(), suppress=True)
         except Exception as exc:
             print(f"main: failed to register global hotkeys: {exc}", file=sys.stderr)
 

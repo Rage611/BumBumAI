@@ -1,82 +1,49 @@
 import asyncio
 import sys
 from collections import deque
-from pathlib import Path
+
 
 from groq import AsyncGroq
 import config as _config
 
 # ---------------------------------------------------------------------------
-# Resume context injection
+# System prompt — lean, output-focused, no resume
 # ---------------------------------------------------------------------------
-try:
-    _resume_path = Path(__file__).parent / "resume.md"
-    RESUME_CONTEXT = _resume_path.read_text(encoding="utf-8").strip()
-except FileNotFoundError:
-    RESUME_CONTEXT = "No resume provided."
-    print("llm_client: resume.md not found — context injection disabled.", file=sys.stderr)
-except Exception as _exc:
-    RESUME_CONTEXT = "No resume provided."
-    print(f"llm_client: failed to read resume.md: {_exc}", file=sys.stderr)
+SYSTEM_PROMPT = """You are my real-time interview assistant. You hear what the interviewer asks and you give me the EXACT words I should say out loud.
 
-SYSTEM_PROMPT = f"""You are ME (Rishabh Kumar), sitting live in my Rakuten Product Demo & Technical/HR Interview. You are acting as my direct real-time voice.
-Your goal is to generate the EXACT words I should say out loud to impress and compel the Rakuten panel to hire me.
-
-CORE PERSONA & TONE:
-1. NATURAL SPOKEN ENGLISH: Speak in natural, everyday, simple spoken English—just like a smart, practical college software developer from Bennett University. Do NOT sound like an AI or an essay.
-2. ABSOLUTELY NO AI BUZZWORDS: Never use words like 'orchestrate', 'leverage', 'paradigm', 'pivotal', 'delve', 'testament', 'cutting-edge', 'in essence', 'seamlessly'. Use real spoken phrases like "Yeah, so basically...", "What I did was...", "The main issue was...", "So to handle that, I used...".
-3. SMART, DYNAMIC ANSWER LENGTH:
-   - For quick conceptual/direct questions: Keep it crisp and punchy in 2 to 3 sentences.
-   - For product demo, architectural walkthroughs, or "how did you build GuardGrid": Give a complete, high-impact answer (around 4 to 7 punchy sentences) that covers the user problem, the exact tech decision, how it works, and the business/performance impact.
-   - Give just enough depth to prove senior-level understanding without rambling.
-4. RAKUTEN HIRING MINDSET:
-   - Always showcase ownership, clean system design, performance (<20ms edge latency), database security (Supabase RLS tenant isolation), and cost/efficiency ($0 serverless hosting, 300+ active workforce).
-   - Connect tech decisions to product impact (e.g. why Server Components and RLS make the B2B platform reliable and fast for enterprise clients).
-5. THE ELEVATOR PITCH / INTRO:
-   - If asked "Introduce yourself" or "Walk me through your background": Deliver a confident, natural intro:
-     "I am a pre-final year Computer Science student at Bennett University with a strong focus on full-stack web development and C++ algorithms.
-     Recently, I built and deployed GuardGrid, which is a serverless B2B workforce tracking platform actively used by enterprise security clients to manage over 300 personnel.
-     I also worked with TMS Security Services where I migrated their legacy backend to a serverless Next.js architecture on Vercel, cutting their hosting cost to zero.
-     I love building scalable, production-grade products that solve real operational problems, and that is what excites me about Rakuten."
-6. GUARDGRID PRODUCT DEMO EXPERTISE:
-   - If asked about Next.js 16, App Router, Supabase, RLS, middleware, databases, state management, or technical challenges, always pivot to GuardGrid.
-   - Use the deep architectural context: Server Components for zero client bundle overhead, Edge proxy middleware for <20ms session checks, SECURITY DEFINER functions to solve Postgres RLS recursion, and Server Action cascades for site-supervisor updates.
-7. TELEPROMPTER FORMATTING:
-   - You are feeding words directly to my teleprompter.
-   - You MUST put a double line break (\\n\\n) after EVERY SINGLE SENTENCE so I can pause, breathe, and look directly at the interviewer while reading.
-   - Absolutely NO markdown bolding (**). Keep text plain and readable.
-8. HINGLISH UNDERSTANDING:
-   - If the interviewer asks in Hinglish or Hindi, understand the technical intent completely and respond in natural, confident spoken English.
-
-CRITICAL CODING RULES:
-- If asked for DSA/algorithms code, ALWAYS output optimal C++ with clean variable names and zero comments.
-
---- CANDIDATE RESUME & GUARDGRID DEEP ARCHITECTURAL CONTEXT ---
-{RESUME_CONTEXT}
---- END CONTEXT ---"""
-
+RULES:
+1. EXTREMELY SIMPLE ENGLISH: Talk like a normal 21-year-old college student. Use basic everyday words. Do NOT sound like a textbook or an AI.
+2. BANNED WORDS: Never use these — orchestrate, leverage, paradigm, pivotal, delve, testament, cutting-edge, in essence, seamlessly, simultaneously, exclusive, cripples, starvation, crucial, vital, classic issue, moreover, furthermore, comprehensive, robust.
+   - INSTEAD say: "at the same time", "only one can change it", "makes it really slow", "Yeah so basically...", "What I did was...", "The main problem was...", "So to fix that I just..."
+3. ANSWER LENGTH:
+   - Quick concept questions: 2-3 sentences max.
+   - Deeper technical questions: 4-6 sentences, straight to the point.
+4. TELEPROMPTER FORMAT:
+   - Put a double line break after EVERY sentence so I can pause and breathe.
+   - NO markdown bolding (**). Plain text only.
+5. HINGLISH: If the interviewer speaks in Hindi/Hinglish, understand the intent and reply in simple English.
+6. DSA / CODING: Whenever a DSA or algorithm problem is mentioned (even if the interviewer says "what's your approach" or "how would you solve this"), ALWAYS output BOTH in this exact order:
+   - FIRST: The full C++ code solution. Write it like a beginner — simple for-loops, basic if-else, simple arrays and vectors. No complex STL, no auto, no lambda, no fancy one-liners. Keep variable names simple (i, j, n, arr, ans). Zero comments.
+   - THEN: Below the code, write a short spoken-style approach explanation (3-5 sentences) that I can say out loud. Use extremely simple words. Put a double line break after every sentence.
+   - NEVER skip the code. NEVER give only the approach without code. ALWAYS give both.
+7. NEVER ASK QUESTIONS BACK: You must NEVER ask the interviewer for clarification, more details, or the full problem statement. NEVER say things like "Could you tell me more?", "What exactly do they want?", "Let me know the details". You are a teleprompter — you ONLY output answers. If the question is incomplete or unclear, just answer with whatever information you have. Make reasonable assumptions and give the best possible answer immediately.
+"""
 
 # ---------------------------------------------------------------------------
 # Vision prompt (used by Gemini)
 # ---------------------------------------------------------------------------
 VISION_PROMPT = (
-    "You are a stealth interview assistant analyzing a screenshot.\n\n"
-    "STEP 1 - CLASSIFY: Look at the screenshot and determine the question type:\n"
-    "  A) LEETCODE / ALGORITHM PROBLEM (LeetCode, HackerRank, coding puzzle requiring full solution)\n"
-    "  B) CODE EXPLANATION / REVIEW (VS Code, IDE, code snippet explanation, pointed code, function walkthrough)\n"
-    "  C) THEORETICAL QUESTION (concept explanation, definition, comparison)\n"
-    "  D) SYSTEM DESIGN (architecture diagram, design discussion)\n"
-    "  E) BEHAVIORAL (HR question, tell me about yourself type)\n"
-    "  F) OTHER / UNCLEAR\n\n"
-    "STEP 2 - RESPOND based on your classification:\n"
-    "  If A (LEETCODE / ALGORITHM): Output ONLY the optimal C++ solution. No comments. No explanation.\n"
-    "  If B (CODE EXPLANATION / REVIEW): Look for mouse cursor, active cursor line, text selection. Output a confident, spoken 3-5 sentence explanation.\n"
-    "  If C (THEORETICAL): Output a concise, spoken-style explanation (4-6 sentences max).\n"
-    "  If D (SYSTEM DESIGN): Describe the architecture approach with key components and tradeoffs.\n"
-    "  If E (BEHAVIORAL): Output a confident, first-person spoken answer.\n"
-    "  If F (UNCLEAR): Describe what you see on screen and answer concisely.\n\n"
-    "CRITICAL RULES:\n"
-    "- TELEPROMPTER FORMATTING: You MUST insert a double line break (\\n\\n) after EVERY SINGLE SENTENCE. Write in short, bite-sized fragments so I can naturally pause and breathe. Do NOT write long paragraphs!\n"
+    "You are a stealth interview assistant analyzing a screenshot and the interviewer's verbal question.\n\n"
+    "Look at the screenshot and the interviewer's verbal context. Based on what they are asking, provide the EXACT response I should say out loud or type.\n\n"
+    "CRITICAL RULES FOR DSA / CODING:\n"
+    "- If the interviewer asks for the CODE or SOLUTION, output C++ that a beginner would write. Simple for-loops, basic if-else, simple arrays and vectors. No complex STL, no auto, no lambda, no fancy one-liners. No comments. Then below the code, write a short 3-5 sentence spoken approach explanation.\n"
+    "- If the interviewer ONLY asks 'Walk me through your approach', 'How would you solve this', or 'Explain the logic', output ONLY a spoken-style step-by-step approach in 3-6 sentences using EXTREMELY SIMPLE WORDS. Do NOT output code in this case.\n\n"
+    "CRITICAL RULES FOR GENERAL QUESTIONS:\n"
+    "- Output a confident, spoken-style explanation using EXTREMELY SIMPLE, BASIC ENGLISH.\n"
+    "- Speak like a normal 21-year-old student casually talking to a friend.\n"
+    "- DO NOT use textbook/formal words like: orchestrate, leverage, paradigm, pivotal, delve, testament, simultaneously, exclusive, cripples, starvation, crucial, vital, classic issue, moreover, furthermore.\n"
+    "- INSTEAD USE: 'at the same time', 'only one person can change it', 'makes it really slow'.\n"
+    "- TELEPROMPTER FORMATTING: You MUST insert a double line break (\\n\\n) after EVERY SINGLE SENTENCE. Write in short, bite-sized fragments so I can naturally pause and breathe.\n"
     "- Do NOT use markdown bolding (**). Keep text plain.\n"
 )
 
@@ -110,12 +77,16 @@ class ProviderChain:
         self._providers: list[dict] = []
         self._idx = 0
 
-    def add(self, client, model_name: str, label: str) -> None:
-        self._providers.append({"client": client, "model": model_name, "label": label})
+    def add(self, p_type: str, client, model_name: str, label: str) -> None:
+        self._providers.append({"type": p_type, "client": client, "model": model_name, "label": label})
 
     @property
     def empty(self) -> bool:
         return len(self._providers) == 0
+
+    @property
+    def type(self) -> str:
+        return self._providers[self._idx]["type"]
 
     @property
     def client(self):
@@ -152,41 +123,50 @@ class ProviderChain:
 # Chain builder — expands each model into N entries (one per API key)
 # ---------------------------------------------------------------------------
 _DEFAULT_CHAIN = [
-    {"provider": "groq", "model": "openai/gpt-oss-120b"},
-    {"provider": "groq", "model": "openai/gpt-oss-20b"},
+    {"provider": "groq",     "model": "openai/gpt-oss-120b"},
+    {"provider": "google",   "model": "gemini-3.6-flash"},
+    {"provider": "cerebras", "model": "gpt-oss-120b"},
 ]
 
-def _build_chain(groq_keys: list[str]) -> ProviderChain:
-    """
-    Build the provider chain from config.
-    For each model in LLM_CHAIN, add one entry per available API key.
-    This means key rotation happens before model failover.
-    """
+def _build_chain() -> ProviderChain:
+    """Reads LLM_CHAIN and all API key lists from config.json. No arguments needed."""
     cfg = _config.load_config()
     chain_cfg = cfg.get("LLM_CHAIN", _DEFAULT_CHAIN)
-    valid_groq_keys = [k for k in groq_keys if k.strip()]
+
+    google_keys   = [k for k in cfg.get("GOOGLE_API_KEYS",   []) if k.strip()]
+    groq_keys     = [k for k in cfg.get("GROQ_API_KEYS",     []) if k.strip()]
+    cerebras_keys = [k for k in cfg.get("CEREBRAS_API_KEYS", []) if k.strip()]
 
     chain = ProviderChain()
-    seen_combos: set[str] = set()
 
     for entry in chain_cfg:
-        if isinstance(entry, dict):
-            provider = entry.get("provider")
-            model = entry.get("model")
-        else:
-            provider, model = entry[0], entry[1]
+        provider = entry.get("provider") if isinstance(entry, dict) else entry[0]
+        model    = entry.get("model")    if isinstance(entry, dict) else entry[1]
 
         if not provider or not model:
             continue
 
-        if provider == "groq":
-            for i, key in enumerate(valid_groq_keys):
-                combo = f"groq:{model}:key{i}"
-                if combo in seen_combos:
-                    continue
-                seen_combos.add(combo)
-                label = f"Groq {model} (key {i+1})"
-                chain.add(AsyncGroq(api_key=key), model, label)
+        if provider == "google":
+            try:
+                from google import genai
+            except ImportError:
+                print("llm_client: google-genai not installed — skipping Google.", file=sys.stderr)
+                continue
+            for i, key in enumerate(google_keys):
+                chain.add("google", genai.Client(api_key=key), model, f"Google {model} (key {i+1})")
+
+        elif provider == "groq":
+            for i, key in enumerate(groq_keys):
+                chain.add("groq", AsyncGroq(api_key=key), model, f"Groq {model} (key {i+1})")
+
+        elif provider == "cerebras":
+            for i, key in enumerate(cerebras_keys):
+                chain.add(
+                    "cerebras",
+                    AsyncGroq(api_key=key, base_url="https://api.cerebras.ai/v1"),
+                    model,
+                    f"Cerebras {model} (key {i+1})",
+                )
         else:
             print(f"llm_client: unknown provider '{provider}' — skipping.", file=sys.stderr)
 
@@ -194,37 +174,12 @@ def _build_chain(groq_keys: list[str]) -> ProviderChain:
 
 
 # ---------------------------------------------------------------------------
-# Conversation history with rolling summary
+# Module-level state
 # ---------------------------------------------------------------------------
-_history: deque = deque(maxlen=20)   # 10 full Q&A exchanges
+_history: deque = deque(maxlen=30)
 _chain: ProviderChain | None = None
 _current_task: asyncio.Task | None = None
-_groq_keys: list[str] = []
 
-
-async def _summarize_history() -> str:
-    """Compress the oldest half of history into a single summary message using the LLM."""
-    if _chain is None or _chain.empty:
-        return ""
-    to_summarize = list(_history)[:10]
-    summary_msgs = [
-        {"role": "system", "content": "Summarize the following interview Q&A in 3 concise sentences for context. Be factual and brief."},
-        {"role": "user", "content": str(to_summarize)},
-    ]
-    try:
-        stream = await _chain.client.chat.completions.create(
-            model=_chain.model,
-            messages=summary_msgs,
-            max_tokens=120,
-            stream=True,
-        )
-        summary_text = ""
-        async for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                summary_text += chunk.choices[0].delta.content
-        return summary_text.strip()
-    except Exception:
-        return ""
 
 
 async def _generate(transcript: str, signals) -> None:
@@ -235,53 +190,82 @@ async def _generate(transcript: str, signals) -> None:
         signals.llm_end.emit()
         return
 
-    # Rolling summary: if history is full, compress the oldest half
-    if len(_history) >= 20:
-        summary = await _summarize_history()
-        # Remove the oldest 10 messages and replace with summary
-        for _ in range(10):
-            if _history:
-                _history.popleft()
-        if summary:
-            _history.appendleft({"role": "system", "content": f"Earlier interview context (summarized): {summary}"})
+    # Strictly keep only the last 5 turns (10 messages) to save massive tokens
+    while len(_history) > 10:
+        _history.popleft()
 
     signals.llm_start.emit()
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + list(_history)
-    messages.append({"role": "user", "content": transcript})
+    
+    # Consolidate history to prevent strict-API errors (e.g. consecutive 'user' roles)
+    consolidated_history = []
+    for msg in _history:
+        if consolidated_history and consolidated_history[-1]["role"] == msg["role"]:
+            consolidated_history[-1]["content"] += "\n" + msg["content"]
+        else:
+            consolidated_history.append({"role": msg["role"], "content": msg["content"]})
+
+    if consolidated_history and consolidated_history[-1]["role"] == "user":
+        consolidated_history[-1]["content"] += "\n" + transcript
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + consolidated_history
+    else:
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + consolidated_history + [{"role": "user", "content": transcript}]
+        
     full_response = ""
 
     while True:
         client = _chain.client
         model = _chain.model
         label = _chain.label
+        p_type = _chain.type
 
         try:
-            kwargs: dict = {
-                "model": model,
-                "messages": messages,
-                "stream": True,
-                "max_tokens": 350,
-                "temperature": 0.3,
-                "top_p": 0.9,
-            }
-            stream = await client.chat.completions.create(**kwargs)
-            
-            try:
-                limit = int(stream.response.headers.get("x-ratelimit-limit-tokens", 0))
-                remaining = int(stream.response.headers.get("x-ratelimit-remaining-tokens", 0))
-                if limit > 0:
-                    pct = max(0, min(100, int(((limit - remaining) / limit) * 100)))
-                    signals.token_usage_update.emit(pct)
-            except Exception:
-                pass
+            if p_type == "gemini":
+                from google.genai import types
+                gemini_contents = []
+                for m in messages:
+                    gemini_contents.append(types.Content(role="user" if m["role"] == "user" else "model", parts=[types.Part.from_text(text=m["content"])]))
+                stream = await client.aio.models.generate_content_stream(
+                    model=model,
+                    contents=gemini_contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_PROMPT,
+                        temperature=0.3,
+                    )
+                )
+                
+                async for chunk in stream:
+                    token = chunk.text or ""
+                    if token:
+                        full_response += token
+                        signals.llm_token.emit(token)
 
-            async for chunk in stream:
-                if not chunk.choices:
-                    continue
-                token = chunk.choices[0].delta.content
-                if token:
-                    full_response += token
-                    signals.llm_token.emit(token)
+            elif p_type in ["groq", "cerebras"]:
+                kwargs = {
+                    "model": model,
+                    "messages": messages,
+                    "stream": True,
+                    "max_tokens": 350,
+                    "temperature": 0.3,
+                    "top_p": 0.9,
+                }
+                stream = await client.chat.completions.create(**kwargs)
+                
+                try:
+                    limit = int(stream.response.headers.get("x-ratelimit-limit-tokens", 0))
+                    remaining = int(stream.response.headers.get("x-ratelimit-remaining-tokens", 0))
+                    if limit > 0:
+                        pct = max(0, min(100, int(((limit - remaining) / limit) * 100)))
+                        signals.token_usage_update.emit(pct)
+                except Exception:
+                    pass
+
+                async for chunk in stream:
+                    if not chunk.choices:
+                        continue
+                    token = chunk.choices[0].delta.content
+                    if token:
+                        full_response += token
+                        signals.llm_token.emit(token)
 
             _history.append({"role": "user", "content": transcript})
             _history.append({"role": "assistant", "content": full_response})
@@ -289,6 +273,8 @@ async def _generate(transcript: str, signals) -> None:
             return  # success
 
         except asyncio.CancelledError:
+            if transcript.strip():
+                _history.append({"role": "user", "content": transcript})
             signals.llm_end.emit()
             raise
 
@@ -392,16 +378,20 @@ async def generate_vision_response(base64_image: str, current_audio_transcript: 
     signals.llm_end.emit()
 
 
-# ---------------------------------------------------------------------------
-# Public entry point — debounced LLM runner
-# ---------------------------------------------------------------------------
-async def run_llm(llm_queue: asyncio.Queue, signals, groq_keys: list[str]) -> None:
-    global _current_task, _chain, _groq_keys
-    _groq_keys = groq_keys
-    _chain = _build_chain(groq_keys)
+def rebuild_chain() -> None:
+    """Rebuild the provider chain from the latest config. Call after saving settings or switching models."""
+    global _chain
+    _chain = _build_chain()
+    label = _chain.label if not _chain.empty else "empty"
+    print(f"llm_client: Chain rebuilt — {len(_chain._providers)} slot(s). Primary: {label}.", file=sys.stderr)
+
+
+async def run_llm(llm_queue: asyncio.Queue, signals) -> None:
+    global _current_task, _chain
+    _chain = _build_chain()
 
     if _chain.empty:
-        print("llm_client: No valid Groq API keys. LLM disabled.", file=sys.stderr)
+        print("llm_client: No valid API keys found. LLM disabled.", file=sys.stderr)
         return
 
     print(f"llm_client: ProviderChain ready — {len(_chain._providers)} slot(s). Primary: {_chain.label}.", file=sys.stderr)

@@ -79,8 +79,8 @@ def find_wasapi_loopback(pa: pyaudio.PyAudio) -> int | None:
                 return i
         return None
 
-    # Prefer Speaker loopback, then Headphone, then anything
-    for priority_keyword in ("speaker", "headphone", ""):
+    # Prefer JBL Headphones, then Headphone, then Speaker, then anything
+    for priority_keyword in ("jbl", "headphone", "speaker", ""):
         for idx, name in loopback_devices:
             if priority_keyword in name.lower():
                 print(f"audio_capture: WASAPI loopback selected: [{idx}] {name!r}", file=sys.stderr)
