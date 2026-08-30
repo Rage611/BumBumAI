@@ -67,6 +67,12 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Parakeet — Settings")
         self.setMinimumWidth(480)
+        # Hide from screen capture / screen share
+        try:
+            hwnd = ctypes.c_void_p(int(self.winId()))
+            ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x00000011)
+        except Exception:
+            pass
         self.setStyleSheet("""
             QDialog { background-color: #111; color: #ddd; }
             QLabel { color: #aaa; font-size: 12px; }
