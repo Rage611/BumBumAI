@@ -544,6 +544,14 @@ class MainWindow(QMainWindow):
         self._current_interim = ""
         self._render_transcript()
 
+    def _smart_scroll(self):
+        """Only auto-scroll if the user is already near the bottom (within 50px).
+        If they scrolled up to read something, don't yank them down."""
+        sb = self.ai_edit.verticalScrollBar()
+        near_bottom = (sb.maximum() - sb.value()) < 50
+        if near_bottom:
+            sb.setValue(sb.maximum())
+
     def _on_llm_start(self):
         self._is_streaming = True
         self._cursor_visible = True
@@ -555,7 +563,7 @@ class MainWindow(QMainWindow):
         cursor = self._ai_doc_cursor_at_end()
         cursor.insertText("█")
         self._cursor_char_shown = True
-        self.ai_edit.verticalScrollBar().setValue(self.ai_edit.verticalScrollBar().maximum())
+        self._smart_scroll()
         self.cursor_timer.start(600)
 
     def _on_llm_token(self, token):
@@ -574,7 +582,7 @@ class MainWindow(QMainWindow):
         if self._is_streaming:
             cursor.insertText("█")
             self._cursor_char_shown = True
-        self.ai_edit.verticalScrollBar().setValue(self.ai_edit.verticalScrollBar().maximum())
+        self._smart_scroll()
 
     def _on_llm_end(self):
         self._is_streaming = False
@@ -584,7 +592,7 @@ class MainWindow(QMainWindow):
         if self._token_buffer:
             self._flush_token_buffer()
         self._ai_remove_cursor_char()
-        self.ai_edit.verticalScrollBar().setValue(self.ai_edit.verticalScrollBar().maximum())
+        self._smart_scroll()
 
     def _on_cursor_toggle(self):
         self._cursor_visible = not self._cursor_visible

@@ -68,9 +68,9 @@ import config as _config
 
 VAD_FRAME_SAMPLES     = 320          # 20ms @ 16kHz
 VAD_FRAME_BYTES       = VAD_FRAME_SAMPLES * 2  # int16
-VAD_AGGRESSIVENESS    = 2            # 0–3; 2 = balanced
+VAD_AGGRESSIVENESS    = 1            # 0–3; 1 = more sensitive, catches quieter speech
 MIN_SPEECH_FRAMES     = 5            # At least 5 VAD frames (100ms) of speech
-SILENCE_END_FRAMES    = 15           # 15 consecutive silent frames (300ms) = end of utterance
+SILENCE_END_FRAMES    = 35           # 35 consecutive silent frames (700ms) = end of utterance
 MAX_BUFFER_CHUNKS     = 80           # Hard cap: 8s of audio
 
 # ---------------------------------------------------------------------------
