@@ -18,7 +18,7 @@ Real-time ASL recognition via OpenCV+MediaPipe+TensorFlow. 94% accuracy, 30 FPS,
 
 # Technical Skills
 Languages: C++, TypeScript, Python, JavaScript | Frameworks: Next.js, React, Node.js, TensorFlow, OpenCV
-Databases: PostgreSQL, Supabase, MongoDB | Tools: Git, Vercel, Vitest, Postman
+Databases: PostgreSQL, Supabase, MongoDB | Tools: Git, Vercel, Vitest, Postman, Playwright (planned)
 
 ---
 
@@ -61,7 +61,7 @@ Unit: validation (40), employee validation (27), filter/sanitization (20), desig
 Integration: RLS, tenant isolation, DB constraints, employee lifecycle, site CRUD, supervisor cascade, multi-tenant
 Strongest areas: database security, RLS, validation, constraints, lifecycle, multi-tenant isolation
 
-## What Does NOT Exist
+## What Does NOT Exist in GuardGrid
 No E2E tests, no Playwright/Cypress/Selenium, no frontend component tests, no API route tests, no CI/CD pipeline, no load tests, no visual regression tests. No MFA/2FA, no rate limiting, no account lockout.
 
 ## Security Gaps
@@ -102,3 +102,54 @@ Create users from two companies. Verify one tenant cannot read/create/update/del
 
 ## Highest Risk Area
 Multi-tenant authorization and data isolation — a failure exposes one company's employee/document data to another company.
+
+---
+
+# GENERAL QA & AUTOMATION MASTER CHEAT SHEET
+
+## Universal 6-Pillar Test Framework (For ANY "How would you test X?" question)
+1. Functional / Happy Path: Core purpose works as expected with valid data.
+2. UI & Usability: Visual layout, typography, responsive design, contrast, error labels, accessibility.
+3. Negative & Boundary: Empty fields, max-length overflow, invalid formats, special/unicode characters, SQLi/XSS scripts.
+4. Security & Access: Unauthorized URL access, IDOR, session hijack, token expiry, privilege escalation.
+5. Performance & Concurrency: High traffic load, concurrent writes (race conditions), slow 3G network, latency.
+6. Compatibility & Resilience: Cross-browser (Chrome/Safari/Firefox), mobile viewports, abrupt power loss, network drop during request.
+
+## Test Design Techniques
+- BVA (Boundary Value Analysis): Test boundaries [min-1, min, min+1, max-1, max, max+1]. E.g., for password 8-16 chars: test 7, 8, 9, 15, 16, 17.
+- Equivalence Partitioning (EP): Split input into valid and invalid partitions, pick 1 sample each. E.g., age 18-60: valid [25], invalid [<18 -> 10], invalid [>60 -> 75].
+- Decision Table: Mapping complex business rules with multiple condition combinations (e.g., promo codes + cart total).
+- State Transition: Testing lifecycle flows (e.g., Cart -> Order Placed -> Payment Pending -> Shipped -> Delivered / Returned).
+- Error Guessing: Experience-based testing for common dev slips (null pointers, space-only strings, 0 quantity, rapid double-clicks).
+
+## Core QA Concepts & Bug Management
+- Functional vs Non-Functional: Functional = *WHAT* the system does (login, checkout, business logic). Non-functional = *HOW* it performs (speed, scalability, security, UX). UI testing is mostly functional (validating elements/behavior against specs), though visual aesthetics/responsiveness cross into non-functional usability.
+- Severity vs Priority:
+  - High Sev / High Prio: Payment gateway crash, cannot place order.
+  - High Sev / Low Prio: Crash when exporting 50,000 logs in an obscure legacy tab.
+  - Low Sev / High Prio: Company name/logo misspelled on login landing page.
+  - Low Sev / Low Prio: 2px misalignment in footer copyright text.
+- Bug Lifecycle: New -> Assigned -> Open -> Fixed -> Retest -> Closed (or Reopened / Deferred / As Expected).
+- Smoke vs Sanity: Smoke = build verification (is build stable enough for testing?). Sanity = post-bugfix quick check on impacted modules.
+
+## API Testing Master Guide
+- Status Codes:
+  - 2xx: 200 OK, 201 Created (POST), 204 No Content (DELETE)
+  - 4xx: 400 Bad Request, 401 Unauthorized (no auth), 403 Forbidden (authenticated but no permission), 404 Not Found, 409 Conflict (duplicate), 422 Unprocessable Entity, 429 Too Many Requests (rate limit)
+  - 5xx: 500 Internal Error, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout
+- Idempotency: Repeating a request N times produces the exact same server state. GET, PUT, DELETE are idempotent. POST and PATCH are NOT idempotent.
+- What to Test in an API: HTTP status code, response time (<200ms), schema/type validation, boundary payloads, missing/tampered auth headers, SQL injection / XSS in params.
+
+## Test Automation & CI/CD Strategy
+- Test Pyramid: 70% Unit (fastest, cheapest, mocks IO) -> 20% Integration (tests DB, API contracts) -> 10% E2E (user flows via Playwright/Selenium).
+- Flaky Tests & Prevention: Caused by hardcoded sleeps, shared database state, or race conditions. Fix by: using explicit smart assertions/polling (e.g. `await expect().toBeVisible()`), running tests in isolated transactions/DB containers, resetting test data per run.
+- Mock vs Stub vs Spy: Stub = returns canned hardcoded data. Mock = object with expectations on how/when it is called. Spy = wraps real object to record calls.
+- Ideal CI/CD Pipeline: GitHub Actions PR trigger -> Run Linter/Typecheck -> Run Vitest Unit -> Run Integration against Docker Postgres -> Run Headless Playwright E2E -> Build and deploy to staging.
+
+## E-Commerce / Rakuten Domain Scenarios
+- Shopping Cart & Checkout Test Cases:
+  - Functional: Add item, remove item, update quantity, apply valid discount coupon.
+  - Edge/Race: 2 users purchase the last 1 item in stock simultaneously -> 1 succeeds, 1 gets "Out of stock" without duplicate charge.
+  - Negative: Negative quantity (-1), zero quantity, applying expired coupons, price tampering via API payload manipulation.
+  - Payment: Network disconnect during payment processing, double-clicking "Pay Now" button, invalid CVV/OTP handling.
+  - Session/State: Cart persists across tab reload or logging in from another device.
