@@ -317,8 +317,6 @@ async def _generate(transcript: str, signals) -> None:
             return  # success
 
         except asyncio.CancelledError:
-            if full_response.strip():
-                _history.append({"role": "user", "content": transcript})
             _is_generating = False
             signals.llm_end.emit()
             raise
@@ -443,52 +441,87 @@ async def run_llm(llm_queue: asyncio.Queue, signals) -> None:
 
     print(f"llm_client: ProviderChain ready — {len(_chain._providers)} slot(s). Primary: {_chain.label}.", file=sys.stderr)
 
-    # Debounce state
-    DEBOUNCE_FAST = 1.0   # concept questions — fire quickly
-    DEBOUNCE_SLOW = 5.0   # DSA coding questions — wait for full problem
+    # -----------------------------------------------------------------------
+    # Universal Question Intent Detection
+    # -----------------------------------------------------------------------
+    _WH_WORDS = {
+        "what", "what's", "whats", "how", "how's", "why", "which",
+        "where", "when", "who", "whose", "whom",
+    }
+    _AUX_PHRASES = [
+        "can you", "could you", "would you", "will you",
+        "do you", "did you", "does it", "is it", "are you",
+        "have you", "has it", "should we", "should i",
+        "can we", "could we", "would it", "shall we",
+    ]
+    _IMPERATIVE_WORDS = {
+        "explain", "describe", "compare", "differentiate", "difference",
+        "write", "implement", "code", "solve", "determine", "calculate",
+        "tell", "walk", "give", "list", "show", "modify", "adjust",
+        "define", "find", "count", "reverse", "sort", "convert", "optimize",
+    }
+    _PROMPT_PHRASES = [
+        "tell me", "walk me through", "give me", "how would you",
+        "difference between", "what if", "how to", "your approach",
+        "what happens", "where does", "write a", "implement a",
+    ]
+    _HINGLISH_WORDS = {
+        "kya", "kaise", "kese", "kyu", "kyun", "kahan", "kab", "konsa", "kaun",
+        "batao", "bataiye", "samjhao", "bolo", "karo", "dikhao",
+    }
+
+    def _has_question_intent(text: str) -> bool:
+        """Universally checks if text asks an actual question or command."""
+        clean = text.strip()
+        if not clean:
+            return False
+        if "?" in clean:
+            return True
+        text_lower = clean.lower()
+        words = text_lower.split()
+        if len(words) < 2:
+            return False
+        if any(w in _WH_WORDS for w in words):
+            return True
+        if any(p in text_lower for p in _AUX_PHRASES):
+            return True
+        if any(w in _IMPERATIVE_WORDS for w in words):
+            return True
+        if any(p in text_lower for p in _PROMPT_PHRASES):
+            return True
+        if any(w in _HINGLISH_WORDS for w in words):
+            return True
+        # Fallback: if a very long utterance has accumulated, assume complete
+        if len(words) >= 30:
+            return True
+        return False
+
+    # Debounce state — one universal, snappy timer
+    DEBOUNCE_WAIT = 1.5
     accumulated: list[str] = []
     debounce_task: asyncio.Task | None = None
-
-    _DSA_KEYWORDS = {
-        "array", "linked", "list", "tree", "binary", "graph", "node",
-        "matrix", "string", "stack", "queue", "hash", "map", "set",
-        "sort", "search", "traverse", "reverse", "rotate", "merge",
-        "swap", "subset", "subsequence", "palindrome", "permutation",
-        "given", "determine", "function", "integers", "elements",
-        "index", "position", "length", "sum", "target", "maximum",
-        "minimum", "path", "depth", "height", "diameter", "level",
-        "jump", "reach", "sliding", "window", "pointer", "two pointer",
-    }
-
-    _TRIGGER_WORDS = {
-        "explain", "what", "how", "why", "define", "compare",
-        "implement", "design", "write", "describe", "tell",
-        "difference", "find", "solve", "reverse", "sort",
-        "traverse", "search", "print", "return", "build",
-    }
+    last_fired_text: str = ""
 
     async def _fire_after_silence():
-        """Wait for silence, then combine accumulated fragments and fire LLM."""
-        nonlocal accumulated, debounce_task
+        """Wait for silence, then only fire if an actual question has been formed."""
+        nonlocal accumulated, debounce_task, last_fired_text
 
-        # Peek at accumulated text to decide debounce length
-        peek = " ".join(accumulated).lower().split()
-        is_dsa = any(w in _DSA_KEYWORDS for w in peek)
-        wait_time = DEBOUNCE_SLOW if is_dsa else DEBOUNCE_FAST
-
-        await asyncio.sleep(wait_time)
+        await asyncio.sleep(DEBOUNCE_WAIT)
         if not accumulated:
             return
+
         combined = " ".join(accumulated).strip()
+
+        # If it's just an introductory preamble (e.g. 'Imagine this scenario...'),
+        # stay silent and keep accumulating until the real question is asked!
+        if not _has_question_intent(combined):
+            debounce_task = None
+            return
+
         accumulated = []
         debounce_task = None
 
-        words = combined.lower().split()
-        has_trigger = any(w in _TRIGGER_WORDS for w in words)
-        if len(words) < 4 and not has_trigger:
-            return  # too short and no question trigger word — ignore
-
-        # Cancel any previous generation
+        # Cancel any previous generation if still active
         global _current_task
         if _current_task is not None and not _current_task.done():
             _current_task.cancel()
@@ -497,19 +530,36 @@ async def run_llm(llm_queue: asyncio.Queue, signals) -> None:
             except asyncio.CancelledError:
                 pass
 
-        # If generating, buffer for later instead of dropping
-        if _is_generating:
-            global _pending_buffer
-            _pending_buffer.append(combined)
-            print(f"llm_client: buffered during generation: '{combined[:50]}'", file=sys.stderr)
-            return
-
-        print(f"llm_client: firing ({'DSA' if is_dsa else 'concept'}, {wait_time}s debounce): '{combined[:60]}'", file=sys.stderr)
+        last_fired_text = combined
+        print(f"llm_client: firing (universal {DEBOUNCE_WAIT}s debounce): '{combined[:60]}'", file=sys.stderr)
         _current_task = asyncio.create_task(_generate(combined, signals))
 
     try:
         while True:
             transcript = await llm_queue.get()
+            words = transcript.strip().split()
+            is_filler = len(words) < 3 and not _has_question_intent(transcript)
+
+            # If currently generating and meaningful speech arrives, cancel premature answer immediately
+            if _is_generating and _current_task is not None and not _current_task.done():
+                if is_filler:
+                    # Ignore short verbal feedback (e.g. "ok", "mm-hmm") while streaming answer
+                    continue
+
+                print(f"llm_client: speech detected while generating — cancelling premature answer", file=sys.stderr)
+                _current_task.cancel()
+                try:
+                    await _current_task
+                except asyncio.CancelledError:
+                    pass
+
+                # Prepend previous fragment so the full sentence is preserved
+                if last_fired_text:
+                    accumulated.insert(0, last_fired_text)
+                    last_fired_text = ""
+
+            if not _is_generating:
+                last_fired_text = ""
 
             # Accumulate transcript fragment
             accumulated.append(transcript)

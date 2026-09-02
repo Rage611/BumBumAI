@@ -578,7 +578,9 @@ class MainWindow(QMainWindow):
         self._token_buffer.clear()
         cursor = self._ai_doc_cursor_at_end()
         if not self.ai_edit.document().isEmpty():
-            cursor.insertText("\n\n" + "─" * 32 + "\n\n")
+            doc_text = self.ai_edit.toPlainText().rstrip()
+            if not doc_text.endswith("─" * 32):
+                cursor.insertText("\n\n" + "─" * 32 + "\n\n")
         cursor = self._ai_doc_cursor_at_end()
         cursor.insertText("█")
         self._cursor_char_shown = True
