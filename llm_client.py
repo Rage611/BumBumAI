@@ -445,7 +445,7 @@ async def run_llm(llm_queue: asyncio.Queue, signals) -> None:
 
     # Debounce state
     DEBOUNCE_FAST = 1.0   # concept questions — fire quickly
-    DEBOUNCE_SLOW = 3.0   # DSA coding questions — wait for full problem
+    DEBOUNCE_SLOW = 5.0   # DSA coding questions — wait for full problem
     accumulated: list[str] = []
     debounce_task: asyncio.Task | None = None
 
